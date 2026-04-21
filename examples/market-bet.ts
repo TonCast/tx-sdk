@@ -46,3 +46,21 @@ console.log(`Entries: ${quote.bets.length}`);
 console.log(quote.bets);
 console.log(`totalCost: ${quote.totalCost} nanoTON`);
 console.log(`placement:`, quote.breakdown.placement);
+
+// Before signing, always route through confirmQuote. For TON sources
+// it's a no-op; for jetton sources it runs a fresh reverse-simulation
+// and builds the tx (quoteXxxBet leaves jetton quotes as estimates).
+const confirmed = await txSDK.confirmQuote(quote, {
+  pariAddress: PARI_ADDRESS,
+  beneficiary: BENEFICIARY,
+  referral: null,
+  referralPct: 0,
+});
+if (confirmed.option.feasible) {
+  for (const tx of confirmed.option.txs) {
+    console.log("signing tx:", {
+      to: tx.to.toString(),
+      value: tx.value.toString(),
+    });
+  }
+}

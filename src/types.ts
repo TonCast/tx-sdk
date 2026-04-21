@@ -77,29 +77,60 @@ export type PricedCoin = {
   /** Balance, echoed from input. */
   amount: bigint;
   /**
-   * Gross TON produced by swapping the full `amount` — `minAskUnits` from
-   * the STON.fi simulation. For TON itself: equals `amount`.
+   * **Pessimistic** gross TON output of the full swap. For jettons this
+   * is `minAskUnits` from STON.fi (= `askUnits × (1 − slippage)`): the
+   * guaranteed floor that the DEX refuses to deliver below. For TON
+   * itself: equals `amount`.
+   *
+   * Use this for feasibility checks — planner's `netTon ≥ totalCost`
+   * guard relies on the floor so the bet can't fail for want of TON.
    */
   tonEquivalent: bigint;
   /**
-   * TON this coin's swap will lock in the user's wallet as gas. For TON:
-   * {@link TON_DIRECT_GAS} (0.05 TON). For direct jetton swap:
-   * {@link DIRECT_HOP_JETTON_GAS_ESTIMATE} (0.3 TON). For 2-hop:
-   * {@link CROSS_HOP_JETTON_GAS_ESTIMATE} (0.6 TON). For `route === null`:
-   * `0n` (coin is unusable anyway).
+   * **Expected** gross TON output of the full swap in stable pool
+   * conditions. For jettons this is `askUnits` from STON.fi — the
+   * slippage-unadjusted projection. For TON: equals `amount` (no swap
+   * involved, nothing to slippage).
+   *
+   * Use this for UI display. It is typically `tonEquivalent / (1 − slippage)`,
+   * i.e. ~5% higher than the pessimistic floor at the default 5% slippage.
+   */
+  tonEquivalentExpected: bigint;
+  /**
+   * TON the user must hold on their wallet for this swap to go through.
+   * For TON: {@link TON_DIRECT_GAS} (0.05 TON) — gas buffer for Pari.
+   * For direct jetton swap: {@link DIRECT_HOP_JETTON_GAS_ESTIMATE} (0.3 TON).
+   * For 2-hop jetton swap: {@link CROSS_HOP_JETTON_GAS_ESTIMATE} (0.6 TON).
+   * For `route === null`: `0n` (coin is unusable anyway).
+   *
+   * **This is paid from the user's TON wallet, not from the jetton.**
+   * The planner checks it separately via `tonOnWallet ≥ gasReserve +
+   * walletReserve` and fails with `insufficient_ton_for_gas` when short.
+   * `netTon` does NOT deduct this for jettons — a jetton's capacity to
+   * fund the bet is its own swap output, orthogonal to wallet gas.
    */
   gasReserve: bigint;
   /**
-   * `tonEquivalent − gasReserve` when `viable`, else `0n`. The honest
-   * number to show in the UI as "this coin brings X TON to the bet".
+   * Guaranteed TON this coin contributes to the bet.
+   *
+   * - For TON: `amount − walletReserve − TON_DIRECT_GAS` (the bet and its
+   *   Pari gas are both billed to the same TON balance, so we net both
+   *   out).
+   * - For jettons: equals {@link tonEquivalent} (no gas subtraction —
+   *   swap gas is paid from TON wallet, not from this jetton).
+   *
+   * `0n` when `!viable`. UIs that want to show an optimistic preview
+   * should use `tonEquivalentExpected` instead for jettons (this field
+   * is the safety-critical pessimistic one).
    */
   netTon: bigint;
   /** Discovered route to TON. `null` for TON itself or when discovery failed. */
   route: "direct" | { intermediate: string } | null;
   /**
-   * `true` iff swapping this coin delivers strictly more TON than it costs
-   * in gas (plus, for TON, the wallet reserve). Only viable coins may be
-   * used as a funding source.
+   * `true` iff swapping this coin is net-positive in TON terms —
+   * `tonEquivalent > gasReserve`. Filters out dust jettons where the
+   * swap would cost more TON (from wallet) than the swap itself
+   * produces. Only viable coins may be used as a funding source.
    */
   viable: boolean;
   /** Human-readable explanation when `!viable`. */
@@ -282,11 +313,31 @@ export type BetOption =
   | {
       feasible: true;
       source: BetOptionSource;
+      /**
+       * - TON-funded quotes: exactly one ready-to-sign `TxParams`.
+       * - Jetton-funded quotes from `quoteXxxBet`: **empty array** —
+       *   `estimated === true`, `offerUnits` is a linear approximation
+       *   and the transaction body has not been built yet. Call
+       *   `sdk.confirmQuote(...)` to run a fresh reverse simulation and
+       *   receive a finalised `BetOption` with `txs.length === 1` and
+       *   `estimated === false`. Signing an estimated jetton quote is
+       *   prevented by construction: there's nothing to sign.
+       */
       txs: TxParams[];
+      /**
+       * `true` iff `breakdown.spend` is a linear approximation based on
+       * the rate from `priceCoins` and `txs` is still empty. Set only on
+       * jetton quotes produced by `quoteXxxBet`; flipped to `false` by
+       * `confirmQuote`. TON quotes never have this flag set.
+       */
+      estimated: boolean;
       /**
        * Spend = amount of `source` the user will send in raw smallest
        * units. Gas = TON gas reservation (TON for direct, 0.3 / 0.6 TON
-       * for jetton swaps).
+       * for jetton swaps). When `estimated === true`, `spend` is the
+       * linear extrapolation `picked.amount × totalCost / picked.tonEquivalent`
+       * (pessimistic) — the actual number after `confirmQuote` is
+       * typically slightly lower.
        */
       breakdown: { spend: bigint; gas: bigint };
       /** Effective slippage tolerance (echo of request or default). */

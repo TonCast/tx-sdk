@@ -10,6 +10,7 @@ import {
 } from "./constants.js";
 import { ToncastError } from "./errors.js";
 import { discoverRoute } from "./routing/discover.js";
+import type { PairsCache } from "./routing/pairsCache.js";
 import type { AvailableCoin, PricedCoin } from "./types.js";
 import { sameAddress } from "./utils/address.js";
 
@@ -36,6 +37,13 @@ export type PriceCoinsInput = {
   tonClient?: TonClient;
   /** Throttled + retried wrapper for STON.fi API calls. */
   callStonApi: NetworkCaller;
+  /**
+   * Optional shared pairs cache. Strongly recommended — when multiple
+   * jettons are priced in the same call, the pairs list is fetched
+   * exactly once (≤ 1 per `PAIRS_CACHE_TTL_MS`) instead of N times.
+   * `ToncastTxSdk.priceCoins` always passes its singleton instance.
+   */
+  pairsCache?: PairsCache;
 };
 
 const defaultCaller: NetworkCaller = async (fn) => fn();
@@ -78,8 +86,9 @@ export async function priceCoins(
         slippage,
         walletReserve,
         apiClient: input.apiClient,
-        tonClient: input.tonClient,
+        ...(input.tonClient !== undefined && { tonClient: input.tonClient }),
         callStonApi,
+        ...(input.pairsCache !== undefined && { pairsCache: input.pairsCache }),
       }),
     ),
   );
@@ -92,6 +101,7 @@ async function priceOne(args: {
   apiClient: StonApiClient;
   tonClient?: TonClient;
   callStonApi: NetworkCaller;
+  pairsCache?: PairsCache;
 }): Promise<PricedCoin> {
   const { coin, slippage, walletReserve } = args;
   const meta = {
@@ -107,7 +117,10 @@ async function priceOne(args: {
     const netTon = coin.amount > required ? coin.amount - required : 0n;
     return {
       ...meta,
+      // For TON, no swap is involved — min and expected collapse to the
+      // same number, the raw balance.
       tonEquivalent: coin.amount,
+      tonEquivalentExpected: coin.amount,
       gasReserve,
       netTon,
       route: "direct",
@@ -124,6 +137,7 @@ async function priceOne(args: {
     return {
       ...meta,
       tonEquivalent: 0n,
+      tonEquivalentExpected: 0n,
       gasReserve: 0n,
       netTon: 0n,
       route: null,
@@ -140,23 +154,37 @@ async function priceOne(args: {
       offerUnits: coin.amount.toString(),
       slippage,
       callStonApi: args.callStonApi,
+      ...(args.pairsCache !== undefined && { pairsCache: args.pairsCache }),
     });
 
-    const tonEquivalent =
-      route.type === "direct"
-        ? BigInt(route.leg1.minAskUnits || "0")
-        : BigInt(route.leg2.minAskUnits || "0");
+    // For a direct route the final TON delivery is leg1's ask; for a
+    // cross-hop it's leg2's ask (intermediate → TON). In both cases we
+    // capture BOTH the pessimistic floor (minAskUnits) and the expected
+    // output (askUnits).
+    const finalLeg = route.type === "direct" ? route.leg1 : route.leg2;
+    const tonEquivalent = BigInt(finalLeg.minAskUnits || "0");
+    const tonEquivalentExpected = BigInt(finalLeg.askUnits || "0");
     const gasReserve =
       route.type === "direct"
         ? DIRECT_HOP_JETTON_GAS_ESTIMATE
         : CROSS_HOP_JETTON_GAS_ESTIMATE;
 
+    // `viable` filters dust jettons: if the swap delivers less TON than
+    // it costs in wallet gas, using this coin is net-destructive. Note
+    // that gas is paid from the TON wallet (not from this jetton) — the
+    // comparison is just a sanity filter in TON-cost terms, not an
+    // accounting deduction.
     const viable = tonEquivalent > gasReserve;
-    const netTon = viable ? tonEquivalent - gasReserve : 0n;
+
+    // `netTon` is the jetton's gross contribution to the bet, equal to
+    // the pessimistic swap output. Gas is NOT deducted here because it
+    // is a separate wallet-TON charge (see `gasReserve` docstring).
+    const netTon = viable ? tonEquivalent : 0n;
 
     return {
       ...meta,
       tonEquivalent,
+      tonEquivalentExpected,
       gasReserve,
       netTon,
       route:
@@ -167,13 +195,14 @@ async function priceOne(args: {
       ...(viable
         ? {}
         : {
-            reason: `swap delivers ${tonEquivalent} nano-TON but costs ${gasReserve} in gas — net ≤ 0.`,
+            reason: `swap delivers ${tonEquivalent} nano-TON but costs ${gasReserve} TON in wallet gas — net-destructive.`,
           }),
     };
   } catch (cause) {
     return {
       ...meta,
       tonEquivalent: 0n,
+      tonEquivalentExpected: 0n,
       gasReserve: 0n,
       netTon: 0n,
       route: null,

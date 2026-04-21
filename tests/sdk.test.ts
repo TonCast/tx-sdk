@@ -29,6 +29,7 @@ function tonPriced(amount: bigint): PricedCoin {
     address: TON_ADDRESS,
     amount,
     tonEquivalent: amount,
+    tonEquivalentExpected: amount,
     gasReserve: 50_000_000n,
     netTon: amount > 100_000_000n ? amount - 100_000_000n : 0n,
     route: "direct",
@@ -286,8 +287,10 @@ function priceUsdtDirect(tonEq: bigint): PricedCoin {
     address: USDT,
     amount: 100_000_000n,
     tonEquivalent: tonEq,
+    tonEquivalentExpected: (tonEq * 100n) / 95n,
     gasReserve: DIRECT_HOP_JETTON_GAS_ESTIMATE,
-    netTon: tonEq - DIRECT_HOP_JETTON_GAS_ESTIMATE,
+    // Post-fix: no gas deduction from netTon for jettons.
+    netTon: tonEq > DIRECT_HOP_JETTON_GAS_ESTIMATE ? tonEq : 0n,
     route: "direct",
     viable: tonEq > DIRECT_HOP_JETTON_GAS_ESTIMATE,
     symbol: "USDT",
@@ -296,15 +299,7 @@ function priceUsdtDirect(tonEq: bigint): PricedCoin {
 }
 
 describe("ToncastTxSdk jetton source", () => {
-  it("quoteFixedBet + confirmQuote: USDT direct route, lockedInRate captured", async () => {
-    const forward = buildSimulation({
-      offerAddress: USDT,
-      askAddress: TON_ADDRESS,
-      offerUnits: "100000000",
-      askUnits: "50000000000",
-      minAskUnits: "49500000000",
-      priceImpact: "0.01",
-    });
+  it("quoteFixedBet returns ESTIMATED jetton quote; confirmQuote finalises it", async () => {
     const reverse = buildSimulation({
       offerAddress: USDT,
       askAddress: TON_ADDRESS,
@@ -313,10 +308,8 @@ describe("ToncastTxSdk jetton source", () => {
       minAskUnits: "5700000000",
       priceImpact: "0.01",
     });
-    const apiClient = createMockApiClient({
-      simulations: { [`${USDT}→${TON_ADDRESS}`]: forward },
-    });
-    // Inject fresh reverse behavior by stubbing the underlying client.
+    const apiClient = createMockApiClient();
+    // Inject simulateReverseSwap — confirmQuote will call this.
     (apiClient as { simulateReverseSwap?: unknown }).simulateReverseSwap =
       vi.fn(async () => reverse);
     const sdk = new ToncastTxSdk({
@@ -346,14 +339,29 @@ describe("ToncastTxSdk jetton source", () => {
       pricedCoins,
     });
 
+    // Post-0.2.0: jetton quote is estimated, has no tx yet.
     expect(quote.option.feasible).toBe(true);
+    if (quote.option.feasible) {
+      expect(quote.option.estimated).toBe(true);
+      expect(quote.option.txs).toEqual([]);
+    }
     expect(quote.lockedInRate).not.toBeNull();
     if (quote.lockedInRate) {
       expect(quote.lockedInRate.source).toBe(USDT);
-      expect(quote.lockedInRate.priceImpact).toBe(0.01);
+      // Planner doesn't simulate → priceImpact is 0 sentinel.
+      expect(quote.lockedInRate.priceImpact).toBe(0);
     }
 
-    // confirmQuote re-simulates and returns fresh txs.
+    // simulateReverseSwap must NOT have been called yet — the planner
+    // used a linear estimate. confirmQuote will call it next.
+    const reverseFn = (
+      apiClient as unknown as {
+        simulateReverseSwap: { mock: { calls: unknown[] } };
+      }
+    ).simulateReverseSwap;
+    expect(reverseFn.mock.calls.length).toBe(0);
+
+    // confirmQuote runs the fresh reverse sim and builds the tx.
     const fresh = await sdk.confirmQuote(quote, {
       pariAddress: PARI,
       beneficiary: BENEFICIARY,
@@ -362,27 +370,18 @@ describe("ToncastTxSdk jetton source", () => {
     });
     expect(fresh.option.feasible).toBe(true);
     if (fresh.option.feasible) {
+      expect(fresh.option.estimated).toBe(false);
       expect(fresh.option.txs).toHaveLength(1);
+      expect(fresh.option.breakdown.spend).toBe(5_700_000n);
     }
+    // Exactly one simulate-reverse call happened across the whole flow.
+    expect(reverseFn.mock.calls.length).toBe(1);
   });
 
-  it("confirmQuote throws SLIPPAGE_DRIFTED when re-sim exceeds slippage", async () => {
-    const forward = buildSimulation({
-      offerAddress: USDT,
-      askAddress: TON_ADDRESS,
-      offerUnits: "100000000",
-      askUnits: "50000000000",
-      minAskUnits: "49500000000",
-      priceImpact: "0.01",
-    });
-    const reverseInitial = buildSimulation({
-      offerAddress: USDT,
-      askAddress: TON_ADDRESS,
-      offerUnits: "5700000",
-      askUnits: "5700000000",
-      minAskUnits: "5700000000",
-      priceImpact: "0.01",
-    });
+  it("confirmQuote throws SLIPPAGE_DRIFTED when fresh sim exceeds slippage", async () => {
+    // Since planBetOption no longer simulates, the ONLY reverse-swap
+    // call happens inside confirmQuote. Seed it to return a drifted
+    // priceImpact and verify the error.
     const reverseDrifted = buildSimulation({
       offerAddress: USDT,
       askAddress: TON_ADDRESS,
@@ -392,15 +391,9 @@ describe("ToncastTxSdk jetton source", () => {
       priceImpact: "0.12", // 12% > 5% limit → drift
     });
 
-    const apiClient = createMockApiClient({
-      simulations: { [`${USDT}→${TON_ADDRESS}`]: forward },
-    });
-    let reverseCalls = 0;
+    const apiClient = createMockApiClient();
     (apiClient as { simulateReverseSwap?: unknown }).simulateReverseSwap =
-      vi.fn(async () => {
-        reverseCalls += 1;
-        return reverseCalls === 1 ? reverseInitial : reverseDrifted;
-      });
+      vi.fn(async () => reverseDrifted);
     const sdk = new ToncastTxSdk({
       apiClient,
       tonClient: makeFakeTonClient(),

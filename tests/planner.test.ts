@@ -8,7 +8,7 @@ import { planBetOption } from "../src/planner.js";
 import type { RatesClient } from "../src/rates.js";
 import type { BetItem, PricedCoin, TxParams } from "../src/types.js";
 import {
-  buildSimulation,
+  type buildSimulation,
   createMockApiClient,
 } from "./_utils/mockApiClient.js";
 
@@ -72,6 +72,7 @@ function priceTon(amount: bigint): PricedCoin {
     address: TON_ADDRESS,
     amount,
     tonEquivalent: amount,
+    tonEquivalentExpected: amount,
     gasReserve: 50_000_000n,
     netTon: amount - 50_000_000n - 50_000_000n,
     route: "direct",
@@ -89,8 +90,11 @@ function priceJettonDirect(
     address,
     amount,
     tonEquivalent: tonEq,
+    // Expected = minAskUnits / (1 − slippage); approximate as tonEq / 0.95.
+    tonEquivalentExpected: (tonEq * 100n) / 95n,
     gasReserve: DIRECT_HOP_JETTON_GAS_ESTIMATE,
-    netTon: tonEq - DIRECT_HOP_JETTON_GAS_ESTIMATE,
+    // Post-fix: netTon = tonEquivalent (swap gas is billed to TON wallet).
+    netTon: tonEq > DIRECT_HOP_JETTON_GAS_ESTIMATE ? tonEq : 0n,
     route: "direct",
     viable: tonEq > DIRECT_HOP_JETTON_GAS_ESTIMATE,
     symbol: "USDT",
@@ -188,6 +192,7 @@ describe("planBetOption", () => {
       address: USDT,
       amount: 100n,
       tonEquivalent: 1000n,
+      tonEquivalentExpected: 1053n,
       gasReserve: DIRECT_HOP_JETTON_GAS_ESTIMATE,
       netTon: 0n,
       route: "direct",
@@ -315,16 +320,15 @@ describe("planBetOption", () => {
     expect(rates.simulateReverseToTon).not.toHaveBeenCalled();
   });
 
-  it("jetton source: feasible flow locks in rate", async () => {
-    const reverse = buildSimulation({
-      offerAddress: USDT,
-      askAddress: TON_ADDRESS,
-      offerUnits: "5700000",
-      askUnits: totalCost.toString(),
-      minAskUnits: totalCost.toString(),
-      priceImpact: "0.01",
-    });
-    const rates = makeRates({ [USDT]: reverse });
+  it("jetton source: feasible flow returns ESTIMATED quote with linear offerUnits and empty txs", async () => {
+    // Post-0.2.0 behaviour: `planBetOption` does NOT reverse-simulate
+    // for jetton sources. It produces a linear-extrapolation estimate
+    // based on `pricedCoin.amount / pricedCoin.tonEquivalent` and sets
+    // `option.estimated = true, option.txs = []`. The real tx is built
+    // later by `sdk.confirmQuote(...)`.
+    const rates = makeRates(); // no simulations seeded — none should be called
+    // pricedCoin says: 100M USDT → 50B TON. Linear extrapolation for
+    // totalCost=5.7 TON: offerUnits = ceil(100M × 5.7e9 / 50e9) = ceil(11_400_000) = 11_400_000.
     const pricedCoins = [
       priceTon(1_000_000_000n),
       priceJettonDirect(USDT, 100_000_000n, 50_000_000_000n),
@@ -350,40 +354,33 @@ describe("planBetOption", () => {
 
     expect(option.feasible).toBe(true);
     if (option.feasible) {
+      expect(option.estimated).toBe(true);
+      expect(option.txs).toEqual([]); // cannot sign until confirmQuote runs
       expect(option.breakdown.gas).toBe(DIRECT_HOP_JETTON_GAS_ESTIMATE);
       expect(option.route).toBe("direct");
+      // Linear: (amount × totalCost) / tonEquivalent, rounded up.
+      const expected =
+        (100_000_000n * totalCost + 50_000_000_000n - 1n) / 50_000_000_000n;
+      expect(option.breakdown.spend).toBe(expected);
     }
     expect(lockedInRate).not.toBeNull();
     if (lockedInRate) {
       expect(lockedInRate.source).toBe(USDT);
-      expect(lockedInRate.offerUnits).toBe(5_700_000n);
       expect(lockedInRate.targetTonUnits).toBe(totalCost);
-      expect(lockedInRate.priceImpact).toBe(0.01);
+      expect(lockedInRate.route.type).toBe("direct");
     }
+
+    // Critical: planBetOption must NOT hit STON.fi at all for jetton quotes.
+    expect(rates.simulateReverseToTon).not.toHaveBeenCalled();
+    expect(rates.simulateReverseCrossToTon).not.toHaveBeenCalled();
   });
 
-  it("jetton source: cross-hop route, feasible, reverseCross called", async () => {
+  it("jetton source: cross-hop route, still estimated, no reverse-sim called", async () => {
     const COMMUNITY = "EQBynBO23ywHy_CgarY9NK9FTz0yDsG82PtcbSTQgGoXwiuA";
-    const leg1 = buildSimulation({
-      offerAddress: COMMUNITY,
-      askAddress: USDT,
-      offerUnits: "50000000",
-      askUnits: "6000000",
-      minAskUnits: "6000000",
-      priceImpact: "0.01",
-    });
-    const leg2 = buildSimulation({
-      offerAddress: USDT,
-      askAddress: TON_ADDRESS,
-      offerUnits: "6000000",
-      askUnits: totalCost.toString(),
-      minAskUnits: totalCost.toString(),
-      priceImpact: "0.01",
-    });
     const rates: RatesMock = {
       simulateForward: vi.fn(),
       simulateReverseToTon: vi.fn(),
-      simulateReverseCrossToTon: vi.fn(async () => ({ leg1, leg2 })),
+      simulateReverseCrossToTon: vi.fn(),
       clearCache: vi.fn(),
     };
     const pricedCoins: PricedCoin[] = [
@@ -392,8 +389,10 @@ describe("planBetOption", () => {
         address: COMMUNITY,
         amount: 100_000_000n,
         tonEquivalent: 8_000_000_000n,
+        tonEquivalentExpected: 8_421_052_631n, // 8e9 / 0.95 ≈ 8.42e9
         gasReserve: CROSS_HOP_JETTON_GAS_ESTIMATE,
-        netTon: 8_000_000_000n - CROSS_HOP_JETTON_GAS_ESTIMATE,
+        // Post-fix: no gas deduction from netTon for jettons.
+        netTon: 8_000_000_000n,
         route: { intermediate: USDT },
         viable: true,
       },
@@ -419,96 +418,21 @@ describe("planBetOption", () => {
 
     expect(option.feasible).toBe(true);
     if (option.feasible) {
+      expect(option.estimated).toBe(true);
+      expect(option.txs).toEqual([]);
       expect(option.breakdown.gas).toBe(CROSS_HOP_JETTON_GAS_ESTIMATE);
       expect(option.route).toEqual({ intermediate: USDT });
     }
-    expect(rates.simulateReverseCrossToTon).toHaveBeenCalledTimes(1);
+    // Confirmed: no reverse-sim on any path.
+    expect(rates.simulateReverseToTon).not.toHaveBeenCalled();
+    expect(rates.simulateReverseCrossToTon).not.toHaveBeenCalled();
     expect(lockedInRate?.route.type).toBe("cross");
   });
 
-  it("jetton source: reverse-sim throws → no_route infeasible", async () => {
-    const rates: RatesMock = {
-      simulateForward: vi.fn(),
-      simulateReverseToTon: vi.fn(async () => {
-        throw new Error("API down");
-      }),
-      simulateReverseCrossToTon: vi.fn(),
-      clearCache: vi.fn(),
-    };
-    const pricedCoins = [
-      priceTon(1_000_000_000n),
-      priceJettonDirect(USDT, 100_000_000n, 50_000_000_000n),
-    ];
-
-    const { option } = await planBetOption({
-      bets,
-      totalCost,
-      pariAddress: PARI,
-      beneficiary: BENEFICIARY,
-      isYes: true,
-      referral: null,
-      referralPct: 0,
-      source: USDT,
-      pricedCoins,
-      walletReserve: 50_000_000n,
-      rates: rates as unknown as RatesClient,
-      apiClient: createMockApiClient(),
-      tonClient: makeFakeTonClient(),
-      callStonApi: identityCaller,
-      callTonClient: identityCaller,
-    });
-
-    expect(option.feasible).toBe(false);
-    if (!option.feasible) {
-      expect(option.reason).toBe("no_route");
-      expect(option.warnings?.[0]).toContain("API down");
-    }
-  });
-
-  it("jetton source: slippage exceeds limit → slippage_exceeds_limit", async () => {
-    const reverse = buildSimulation({
-      offerAddress: USDT,
-      askAddress: TON_ADDRESS,
-      offerUnits: "5700000",
-      askUnits: totalCost.toString(),
-      minAskUnits: totalCost.toString(),
-      priceImpact: "0.2", // 20% > 5% limit
-    });
-    const rates = makeRates({ [USDT]: reverse });
-    const pricedCoins = [
-      priceTon(1_000_000_000n),
-      priceJettonDirect(USDT, 100_000_000n, 50_000_000_000n),
-    ];
-
-    const { option } = await planBetOption({
-      bets,
-      totalCost,
-      pariAddress: PARI,
-      beneficiary: BENEFICIARY,
-      isYes: true,
-      referral: null,
-      referralPct: 0,
-      source: USDT,
-      pricedCoins,
-      walletReserve: 50_000_000n,
-      slippage: "0.05",
-      rates: rates as unknown as RatesClient,
-      apiClient: createMockApiClient(),
-      tonClient: makeFakeTonClient(),
-      callStonApi: identityCaller,
-      callTonClient: identityCaller,
-    });
-
-    expect(option.feasible).toBe(false);
-    if (!option.feasible) {
-      expect(option.reason).toBe("slippage_exceeds_limit");
-    }
-  });
-
-  // NB: the "mainnet refund" scenario (minAskUnits < totalCost) is now
-  // prevented at the `rates.ts` layer via `grossUpForSlippage` rather
-  // than re-checked in the planner. See tests/rates.test.ts for the
-  // unit coverage of that invariant.
+  // NB: slippage / network-error scenarios for jettons now live in
+  // `confirmQuote` tests (sdk.test.ts), because those only manifest
+  // during the fresh reverse-sim performed immediately before signing.
+  // The planner no longer talks to STON.fi for jetton sources at all.
 
   it("source matches pricedCoins entry across address formats (EQ vs UQ)", async () => {
     // Regression: planner used strict string equality to look up `source`

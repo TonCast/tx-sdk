@@ -72,7 +72,9 @@ if (!quote.option.feasible) {
   process.exit(1);
 }
 
-// Re-check slippage just before signing, in case the pool moved.
+// Mandatory before signing: builds the actual tx (jetton source is
+// estimated until confirmQuote runs) and rejects with SLIPPAGE_DRIFTED
+// if the pool moved beyond the slippage tolerance.
 const fresh = await txSDK.confirmQuote(quote, {
   pariAddress: PARI_ADDRESS,
   beneficiary: BENEFICIARY,

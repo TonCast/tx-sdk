@@ -2,6 +2,7 @@ import type { StonApiClient } from "@ston-fi/api";
 import { DEFAULT_SLIPPAGE, DEX_VERSION, TON_ADDRESS } from "../constants.js";
 import { ToncastBetError, ToncastNetworkError } from "../errors.js";
 import { normalizeAddress, sameAddress } from "../utils/address.js";
+import { PairsCache } from "./pairsCache.js";
 
 /** Async wrapper for a `StonApiClient` call surfaced as {@link ToncastNetworkError}. */
 type NetworkCaller = <T>(fn: () => Promise<T>, method: string) => Promise<T>;
@@ -33,6 +34,14 @@ export type DiscoverRouteInput = {
   maxCandidates?: number;
   /** Networking wrapper (throttle + retry). Optional — if absent, calls raw. */
   callStonApi?: NetworkCaller;
+  /**
+   * Optional shared pairs cache. When omitted, a one-off cache is
+   * constructed for this call (backwards-compatible; no memoisation
+   * across calls). Callers that run `discoverRoute` N times (e.g.
+   * `priceCoins`) should share a single instance to fetch
+   * `/v1/markets` only once.
+   */
+  pairsCache?: PairsCache;
 };
 
 const DEFAULT_MAX_CANDIDATES = 5;
@@ -48,11 +57,19 @@ const defaultCaller: NetworkCaller = async (fn, method) => {
 /**
  * Discover the best route from `offerAddress` to native TON:
  *
- * 1. Try a direct simulation `offer → TON`. If it produces positive
- *    `minAskUnits`, return it as a `direct` route.
- * 2. Otherwise enumerate pairs that connect `offerAddress` to some
- *    intermediate, and the intermediate to TON. Pick the intermediate with
- *    the highest pool TVL, simulate both legs, and return a `cross` route.
+ * 1. Check the (cached) `/v1/markets` pair list: is there a direct
+ *    `offer → TON` pair? If yes, run `simulateSwap` direct. If it
+ *    produces positive `minAskUnits`, return as a `direct` route.
+ * 2. Otherwise (no direct pair, or simulate refused) enumerate pairs
+ *    that connect `offerAddress` to some intermediate, then the
+ *    intermediate to TON. Pick the intermediate with the highest pool
+ *    TVL, simulate both legs, return a `cross` route.
+ *
+ * Pre-checking the pair list avoids the deterministic HTTP 400 that the
+ * STON.fi API returns when a pair has no direct pool (observed for
+ * jettons like TCAST that only have USDT pools). Errors that would
+ * normally show up in the user's console disappear for pools that were
+ * never going to route directly.
  *
  * All upstream failures are surfaced as {@link ToncastNetworkError}.
  */
@@ -68,61 +85,51 @@ export async function discoverRoute(
     callStonApi = defaultCaller,
   } = input;
 
-  // Fire direct sim + pairs prefetch concurrently. If direct works we throw
-  // pairs away; if it fails we already have them.
-  const [directResult, pairsResult] = await Promise.allSettled([
-    callStonApi(
-      () =>
-        apiClient.simulateSwap({
-          offerAddress,
-          askAddress: TON_ADDRESS,
-          offerUnits,
-          slippageTolerance: slippage,
-          dexVersion: DEX_VERSION,
-        }),
-      "simulateSwap",
-    ),
-    callStonApi(() => apiClient.getSwapPairs(), "getSwapPairs"),
-  ]);
+  const pairsCache = input.pairsCache ?? new PairsCache(apiClient, callStonApi);
 
-  if (directResult.status === "fulfilled") {
-    const sim = directResult.value;
-    if (sim.minAskUnits && BigInt(sim.minAskUnits) > 0n) {
-      return { type: "direct", leg1: sim };
+  // Step 1 — check if a direct pair exists. Pair presence does NOT
+  // guarantee the simulate call will succeed (pool may be empty /
+  // deprecated), but its ABSENCE is a strong signal and avoids the 400.
+  const hasDirect = await pairsCache
+    .hasDirectPoolWithTon(offerAddress)
+    .catch(() => false); // fall through to cross if pairs fetch fails
+
+  if (hasDirect) {
+    try {
+      const sim = await callStonApi(
+        () =>
+          apiClient.simulateSwap({
+            offerAddress,
+            askAddress: TON_ADDRESS,
+            offerUnits,
+            slippageTolerance: slippage,
+            dexVersion: DEX_VERSION,
+          }),
+        "simulateSwap",
+      );
+      if (sim.minAskUnits && BigInt(sim.minAskUnits) > 0n) {
+        return { type: "direct", leg1: sim };
+      }
+    } catch {
+      // Simulation failed despite pair being listed — pool might be
+      // deprecated or drained. Fall through to 2-hop discovery.
     }
   }
 
-  // Direct unavailable — need to build a 2-hop route.
-  if (pairsResult.status === "rejected") {
-    // Pairs fetch itself errored with a wrapped ToncastNetworkError.
-    throw pairsResult.reason;
+  // Step 2 — 2-hop discovery.
+  let candidates: string[];
+  try {
+    candidates = await pairsCache.getCrossHopCandidates(offerAddress);
+  } catch (cause) {
+    throw cause instanceof ToncastNetworkError
+      ? cause
+      : new ToncastNetworkError("stonApi", "getSwapPairs", cause);
   }
-  const pairs = pairsResult.value;
-
-  // STON.fi API may return addresses in any textual format; compare via
-  // parsed workchain+hash so we don't miss a valid 2-hop route when the
-  // API returns e.g. raw `0:…` while the caller passed `EQ…`.
-  const tonPairs = new Set<string>();
-  for (const p of pairs) {
-    if (!p[0] || !p[1]) continue;
-    if (sameAddress(p[1], TON_ADDRESS)) tonPairs.add(normalizeAddress(p[0]));
-  }
-  const candidates = [
-    ...new Set(
-      pairs
-        .filter((p) => !!p[0] && !!p[1] && sameAddress(p[0], offerAddress))
-        .map((p) => normalizeAddress(p[1] as string))
-        .filter(
-          (addr): addr is string =>
-            !!addr && !sameAddress(addr, TON_ADDRESS) && tonPairs.has(addr),
-        ),
-    ),
-  ];
 
   if (candidates.length === 0) {
     throw new ToncastBetError(
       "NO_ROUTE",
-      `[Route discovery] No 2-hop route: ${offerAddress} has no pairs bridging to TON (direct swap also failed)`,
+      `[Route discovery] No route from ${offerAddress} to TON (no direct pair, no cross-hop intermediate with a TON pool)`,
     );
   }
 
@@ -203,3 +210,7 @@ export async function discoverRoute(
 
   return { type: "cross", intermediate, leg1, leg2 };
 }
+
+// Re-exports — minor internal refactors shouldn't force downstream to
+// update imports.
+export { sameAddress, normalizeAddress };

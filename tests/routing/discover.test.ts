@@ -23,6 +23,11 @@ describe("discoverRoute", () => {
           minAskUnits: "1980000000",
         }),
       },
+      // Must be seeded so the pairs pre-check finds a direct pool
+      // before the direct-swap simulation is attempted. Without this
+      // `discoverRoute` would (correctly) skip simulate and fall
+      // through to 2-hop.
+      pairs: [[OFFER, TON_ADDRESS]],
     });
 
     const route = await discoverRoute({
@@ -100,6 +105,59 @@ describe("discoverRoute", () => {
     }
   });
 
+  it("skips direct simulate when markets has no direct pair (avoids 400)", async () => {
+    // Regression: some jettons have no direct TON pool (e.g. TCAST),
+    // and STON.fi `/v1/swap/simulate` returns HTTP 400 "Could not find
+    // pool address" on such requests. `discoverRoute` now consults
+    // `/v1/markets` first, so the direct simulate is not even issued
+    // when pairs list has no (OFFER, TON) entry. This test verifies
+    // that `simulateSwap` is called exactly ONCE for the cross-hop
+    // legs (leg1 + leg2 via forward sim), never for the non-existent
+    // direct pool.
+    const apiClient = createMockApiClient({
+      simulations: {
+        [`${OFFER}→${MID_A}`]: buildSimulation({
+          offerAddress: OFFER,
+          askAddress: MID_A,
+          offerUnits: "1000000",
+          askUnits: "5000000000",
+          minAskUnits: "4950000000",
+        }),
+        [`${MID_A}→${TON_ADDRESS}`]: buildSimulation({
+          offerAddress: MID_A,
+          askAddress: TON_ADDRESS,
+          offerUnits: "5000000000",
+          askUnits: "3000000000",
+          minAskUnits: "2970000000",
+        }),
+      },
+      pairs: [
+        [OFFER, MID_A], // no (OFFER, TON) entry → pre-check returns false
+        [MID_A, TON_ADDRESS],
+      ],
+      pools: { [`${OFFER}↔${MID_A}`]: [{ lpTotalSupplyUsd: "5000" }] },
+    });
+
+    const route = await discoverRoute({
+      apiClient,
+      offerAddress: OFFER,
+      offerUnits: "1000000",
+    });
+    expect(route.type).toBe("cross");
+
+    // Crucially: simulateSwap(OFFER → TON) must NEVER have been called.
+    const mock = apiClient.simulateSwap as unknown as {
+      mock: { calls: Array<[{ askAddress: string }]> };
+    };
+    const calledDirectly = mock.mock.calls.some(
+      (c) =>
+        c[0].askAddress === TON_ADDRESS &&
+        c[0] &&
+        (c[0] as { offerAddress?: string }).offerAddress === OFFER,
+    );
+    expect(calledDirectly).toBe(false);
+  });
+
   it("direct sim with zero minAskUnits falls through to 2-hop", async () => {
     const apiClient = createMockApiClient({
       simulations: {
@@ -126,6 +184,9 @@ describe("discoverRoute", () => {
         }),
       },
       pairs: [
+        // Direct pair IS listed — we want the simulate to be attempted
+        // and fail (return 0), then fall through to cross.
+        [OFFER, TON_ADDRESS],
         [OFFER, MID_A],
         [MID_A, TON_ADDRESS],
       ],

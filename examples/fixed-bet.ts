@@ -4,7 +4,11 @@
  * Flow:
  *   1. priceCoins → show user what each coin is worth in TON.
  *   2. User picks one viable source.
- *   3. quoteFixedBet → build tx. confirmQuote → refresh just before signing.
+ *   3. quoteFixedBet → returns a preview (ESTIMATED for jetton sources
+ *      — no STON.fi API call, linear rate from `priceCoins`).
+ *   4. confirmQuote → ALWAYS call before signing. For TON sources it's
+ *      a no-op; for jetton sources it runs the fresh reverse-simulation
+ *      and builds the actual transaction.
  */
 // WARNING: uses mainnet endpoints — test with minimal funds first.
 import { TON_ADDRESS, TonClient, ToncastTxSdk } from "@toncast/tx-sdk";
@@ -67,7 +71,19 @@ if (!quote.option.feasible) {
   process.exit(1);
 }
 
-// 4. Confirm just before signing — re-checks slippage for jetton sources.
+// The jetton path always returns `estimated: true, txs: []` at this
+// point — the real transaction hasn't been built yet. TON path has
+// `txs` populated immediately and `estimated: false`.
+if (quote.option.feasible) {
+  console.log(
+    `  estimated=${quote.option.estimated}, preview spend=${quote.option.breakdown.spend}`,
+  );
+}
+
+// 4. Confirm just before signing. Mandatory for jetton sources (builds
+//    tx), no-op for TON sources (just returns the quote unchanged).
+//    confirmQuote also runs a fresh reverse-simulation and throws
+//    SLIPPAGE_DRIFTED if the pool moved beyond the slippage tolerance.
 const confirmed = await txSDK.confirmQuote(quote, {
   pariAddress: PARI_ADDRESS,
   beneficiary: BENEFICIARY,
@@ -76,9 +92,10 @@ const confirmed = await txSDK.confirmQuote(quote, {
 });
 if (confirmed.option.feasible) {
   for (const tx of confirmed.option.txs) {
-    console.log("tx:", {
+    console.log("signing tx:", {
       to: tx.to.toString(),
       value: tx.value.toString(),
     });
+    // ↳ hand the tx to TonConnect / Tonkeeper / your wallet integration.
   }
 }

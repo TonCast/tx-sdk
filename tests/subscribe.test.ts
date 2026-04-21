@@ -25,6 +25,7 @@ function tonPriced(amount: bigint): PricedCoin {
     address: TON_ADDRESS,
     amount,
     tonEquivalent: amount,
+    tonEquivalentExpected: amount,
     gasReserve: 50_000_000n,
     netTon: amount - 100_000_000n,
     route: "direct",

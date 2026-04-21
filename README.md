@@ -19,6 +19,7 @@
 - [Bet modes](#bet-modes)
 - [Pricing and viability filtering](#pricing-and-viability-filtering)
 - [Confirming a quote before signing](#confirming-a-quote-before-signing)
+- [Rate caching and API traffic](#rate-caching-and-api-traffic)
 - [Single-source funding only](#single-source-funding-only)
 - [Subscriptions](#subscriptions)
 - [How TON flows in a jetton bet](#how-ton-flows-in-a-jetton-bet)
@@ -37,9 +38,9 @@
 
 Given a Pari market on the Toncast protocol and the user's available coins, the SDK produces:
 
-1. **Priced coin list** (`priceCoins`) — a per-coin TON valuation with a `viable` flag: unviable coins (where swap gas exceeds TON delivered) are flagged so the UI can grey them out.
-2. **Bet quote** (`quoteFixedBet` / `quoteLimitBet` / `quoteMarketBet`) — a single TonConnect transaction funded by the user-picked source (TON or one jetton).
-3. **Confirmation step** (`confirmQuote`) — a fresh re-simulation just before the user signs, throwing `SLIPPAGE_DRIFTED` if the price moved beyond `slippage`.
+1. **Priced coin list** (`priceCoins`) — a per-coin TON valuation with a `viable` flag: unviable coins (where swap gas exceeds TON delivered) are flagged so the UI can grey them out. Rate info is cached for 5 minutes.
+2. **Bet quote** (`quoteFixedBet` / `quoteLimitBet` / `quoteMarketBet`) — for TON sources, a ready-to-sign transaction; for jetton sources, an **estimated** preview based on the cached `priceCoins` rate. No STON.fi API call happens at this step for jettons — interactive UIs (sliders, ticket adjusters) can re-quote on every keystroke without network traffic.
+3. **Confirmation step** (`confirmQuote`) — **mandatory** before signing a jetton-funded quote: runs a fresh reverse-simulation, builds the actual transaction, and throws `SLIPPAGE_DRIFTED` if the price moved beyond `slippage`. No-op for TON sources.
 
 Jetton swaps go through STON.fi DEX v2+, either direct or through a single intermediate hop (e.g. jetton → USDT → TON). All cost math mirrors the on-chain Pari / pari-proxy contracts exactly.
 
@@ -55,22 +56,31 @@ npm install @toncast/tx-sdk @ston-fi/api @ston-fi/sdk @ton/ton
 
 ```text
 availableCoins ─────► txSDK.priceCoins()      ────►  PricedCoin[]
+                                                      │  (one STON.fi fetch per coin,
+                                                      │   cached 5 min)
                                                       │
-                                                      │  UI shows
-                                                      │  TON-equivalents,
-                                                      │  user picks
-                                                      │  one source
+                                                      │  UI shows TON-equivalents,
+                                                      │  user picks one source
                                                       ▼
-source + pricedCoins ► txSDK.quoteFixedBet()   ────►  BetQuote
+source + pricedCoins ► txSDK.quoteXxxBet()    ────►  BetQuote (PREVIEW)
+                                                      │  - TON source:    tx ready
+                                                      │  - Jetton source: estimated,
+                                                      │                   txs: [],
+                                                      │                   NO API call
                                                       │
-                                                      │  user reviews,
-                                                      │  presses "Confirm"
+                                                      │  (UI slider re-quotes freely;
+                                                      │   no STON.fi traffic)
+                                                      │
+                                                      │  user presses "Confirm"
                                                       ▼
-                      txSDK.confirmQuote()     ────►  BetQuote (fresh)
+                      txSDK.confirmQuote()     ────►  BetQuote (FINAL)
+                                                      │  - TON source:    unchanged
+                                                      │  - Jetton source: fresh sim,
+                                                      │                   tx built,
+                                                      │                   estimated=false
                                                       │
                                                       │  on SLIPPAGE_DRIFTED:
-                                                      │  show new rate,
-                                                      │  ask to re-confirm
+                                                      │  show new rate, re-confirm
                                                       ▼
                       tonConnect.send(tx)
 ```
@@ -127,7 +137,10 @@ const picked =
   priced.find((c) => c.viable);
 if (!picked) throw new Error("no viable source");
 
-// 3. Quote.
+// 3. Quote. For jetton source this is a PREVIEW — `option.estimated === true`,
+//    `option.txs === []`. No STON.fi call happens here; the rate comes
+//    from the `priceCoins` cache via linear extrapolation. Use this to
+//    render UI sliders / breakdowns cheaply.
 const quote = await txSDK.quoteFixedBet({
   pariAddress: PARI_ADDRESS,
   beneficiary: BENEFICIARY,
@@ -141,7 +154,9 @@ const quote = await txSDK.quoteFixedBet({
 });
 if (!quote.option.feasible) throw new Error(quote.option.reason);
 
-// 4. Confirm just before signing (recheck slippage for jetton source).
+// 4. Confirm just before signing. MANDATORY for jetton sources — this is
+//    where the fresh reverse-simulation runs and `option.txs` gets populated.
+//    For TON sources, confirmQuote is a no-op and returns `quote` unchanged.
 const fresh = await txSDK.confirmQuote(quote, {
   pariAddress: PARI_ADDRESS,
   beneficiary: BENEFICIARY,
@@ -294,29 +309,47 @@ type PricedCoin = {
   symbol?: string;
   decimals?: number;
   amount: bigint;
-  tonEquivalent: bigint; // gross TON after slippage (minAskUnits)
-  gasReserve: bigint;    // swap gas locked on the wallet (0 for TON)
-  netTon: bigint;        // tonEquivalent − gasReserve (0n if !viable)
+  // Gross TON from the full-amount swap. Two flavours:
+  tonEquivalent: bigint;          // pessimistic = minAskUnits = askUnits × (1 − slippage)
+  tonEquivalentExpected: bigint;  // expected = askUnits (stable-market projection)
+  gasReserve: bigint;             // TON needed on the wallet for the swap (0.05/0.3/0.6)
+  netTon: bigint;                 // TON this coin contributes to the bet (= tonEquivalent for jetton)
   route: "direct" | { intermediate: string } | null;
-  viable: boolean;       // swap delivers more TON than it costs in gas
-  reason?: string;       // explanation when !viable
+  viable: boolean;                // tonEquivalent > gasReserve
+  reason?: string;                // explanation when !viable
 };
 ```
 
 The rules:
 
-| Coin                      | Viable iff                                      | `gasReserve`  |
-| ------------------------- | ----------------------------------------------- | ------------- |
-| TON                       | `amount > walletReserve + TON_DIRECT_GAS`       | `0.05 TON`    |
-| Jetton (direct route)     | `tonEquivalent > DIRECT_HOP_JETTON_GAS_ESTIMATE` | `0.3 TON`    |
-| Jetton (2-hop route)      | `tonEquivalent > CROSS_HOP_JETTON_GAS_ESTIMATE`  | `0.6 TON`    |
-| Jetton (no route)         | never                                           | `0n`          |
+| Coin                      | Viable iff                                      | `gasReserve`  | `netTon` formula |
+| ------------------------- | ----------------------------------------------- | ------------- | ---------------- |
+| TON                       | `amount > walletReserve + TON_DIRECT_GAS`       | `0.05 TON`    | `amount − walletReserve − TON_DIRECT_GAS` |
+| Jetton (direct route)     | `tonEquivalent > DIRECT_HOP_JETTON_GAS_ESTIMATE` | `0.3 TON`    | `tonEquivalent` (no gas deduction) |
+| Jetton (2-hop route)      | `tonEquivalent > CROSS_HOP_JETTON_GAS_ESTIMATE`  | `0.6 TON`    | `tonEquivalent` (no gas deduction) |
+| Jetton (no route)         | never                                           | `0n`          | `0n` |
 
-No bet parameters are required. Viability is a pure property of "is swapping this coin net-positive in TON?" — independent of bet sizing. Aggregate `netTon` across the user's viable coins in your UI if you want "total available to bet."
+**Note on `netTon` for jettons.** Swap gas (`gasReserve`) is paid from the user's **TON wallet**, not from the jetton itself. The planner checks TON-wallet gas availability separately (`insufficient_ton_for_gas`), so the jetton's contribution to the bet is simply what the swap delivers — no deduction. Earlier versions incorrectly subtracted `gasReserve` from `netTon`, shrinking the displayed capacity by ~20-60% of the true value.
+
+**`tonEquivalent` vs `tonEquivalentExpected`.** Both refer to the gross TON output of the full-amount swap — the difference is what slippage assumption they use.
+
+- **`tonEquivalent`** = `minAskUnits` = slippage-adjusted floor. The DEX will refuse to deliver less. Safe for `netTon`-based capacity checks.
+- **`tonEquivalentExpected`** = `askUnits` = expected delivery under stable pool conditions. ~5% higher at the default 5% slippage. Best for UI "you'll get ~X TON" labels.
+
+Use `tonEquivalentExpected` in user-facing labels so the displayed swap output matches the realistic delivery. Use `tonEquivalent` / `netTon` for safety-critical path (feasibility checks, capacity planning) — they represent the guaranteed floor.
+
+No bet parameters are required for `priceCoins`. Viability is a pure property of "is swapping this coin net-positive in TON?" — independent of bet sizing.
 
 ## Confirming a quote before signing
 
-`BetQuote.lockedInRate` captures the jetton route, `offerUnits` and `priceImpact` at quote time. `confirmQuote` uses it to detect drift:
+`confirmQuote` is the **authoritative** step that produces a signed-ready `BetQuote` for jetton sources. Behaviour:
+
+- **TON sources**: `confirmQuote` is a no-op. Quote already has `option.txs[0]` ready from `quoteXxxBet`. Calling `confirmQuote` returns the same object — useful so your sign-button handler doesn't branch on source type.
+- **Jetton sources**: `quoteXxxBet` produces an **estimated** quote (`option.estimated === true`, `option.txs === []`). To get a signable tx, call `confirmQuote`. It:
+  1. Clears the rate cache.
+  2. Runs a fresh reverse-simulation against STON.fi for the exact `totalCost`.
+  3. Throws `ToncastBetError` with code `SLIPPAGE_DRIFTED` if the fresh `priceImpact` exceeds the slippage tolerance.
+  4. Otherwise builds the transaction and returns a new `BetQuote` with `option.estimated === false`, `option.txs.length === 1`, and `option.breakdown.spend` refined to the exact `offerUnits`.
 
 ```ts
 try {
@@ -327,18 +360,61 @@ try {
     referral,
     referralPct,
   });
-  // fresh.option.txs are up-to-date — use them for signing.
+  // fresh.option.txs is the authoritative list — sign these.
+  for (const tx of fresh.option.txs) {
+    await tonConnect.sendTransaction(tx);
+  }
 } catch (e) {
   if (e instanceof ToncastBetError && e.code === "SLIPPAGE_DRIFTED") {
     // Show new rate to the user; on Confirm call confirmQuote again.
+    // The underlying rate cache was already cleared inside confirmQuote,
+    // so the next call will also fetch fresh.
+  } else if (e instanceof ToncastBetError && e.code === "QUOTE_INFEASIBLE") {
+    // The quote you passed in was `feasible: false`. Show the failure
+    // reason to the user instead of trying to confirm it.
   } else {
     throw e;
   }
 }
 ```
 
-- TON-funded quotes (`lockedInRate === null`): `confirmQuote` returns the same object — there's no swap, no drift risk.
-- Jetton-funded quotes: `confirmQuote` clears the rate cache, re-runs the reverse simulation for `quote.totalCost`, and throws if `newPriceImpact > slippage`. Otherwise it returns a fresh quote with updated `offerUnits` and rebuilt `txs`.
+Why is `quoteXxxBet` not authoritative for jetton sources? Interactive UIs (sliders, ticket count adjusters) call `quoteXxxBet` many times per second as the user fiddles. Running a reverse-simulation against STON.fi on every keystroke is wasteful — and the user isn't going to sign right now anyway. Deferring the simulate to `confirmQuote` means:
+
+- `priceCoins` is the only step that fetches swap rates during interaction (cached 5 min).
+- `quoteXxxBet` is CPU-only: a linear extrapolation `(amount × totalCost / tonEquivalent)` ≈ jetton needed.
+- `confirmQuote` runs exactly one reverse-simulation just before the signature, giving an exact `offerUnits` and an up-to-the-second drift check.
+
+The linear extrapolation in `quoteXxxBet` is pessimistic (smaller swaps have lower price impact than the full-amount swap `priceCoins` simulated), so the `breakdown.spend` shown in the UI is always an upper bound. `confirmQuote` typically refines `spend` **downward** — user pays slightly less jetton than the preview suggested. Safe.
+
+## Rate caching and API traffic
+
+The SDK minimises STON.fi API traffic aggressively. Three cache layers cooperate:
+
+| Layer | What it caches | Default TTL | Invalidation |
+| --- | --- | --- | --- |
+| **Pairs cache** | `/v1/markets` response (~40K pairs) | `PAIRS_CACHE_TTL_MS` = 5 min | `clearRateCache()` |
+| **Rate cache** | `simulateSwap` / `simulateReverseSwap` responses keyed by `(offer, ask, units, slippage, direction)` | `DEFAULT_RATE_CACHE_TTL_MS` = 5 min | `clearRateCache()` or `confirmQuote` (auto) |
+| **Linear extrapolation** | Jetton `offerUnits` derived from `priceCoins` output | Until next `priceCoins` call | Re-price coins |
+
+Traffic flow for a typical UI session:
+
+```text
+Screen opens:
+  priceCoins(N coins)     → 1 pairs fetch + ≤ N simulate calls.
+
+User drags slider (many times, any mode):
+  quoteXxxBet(...)        → 0 STON.fi calls (linear extrapolation).
+
+User presses "Confirm":
+  confirmQuote(quote)     → 1 simulateReverseSwap (direct) or 2 (cross-hop).
+
+Total STON.fi calls per bet:
+  1 (markets) + N (priceCoins) + 1-2 (confirmQuote)
+```
+
+Previous versions (pre-0.2.0) ran a reverse-simulation on every `quoteXxxBet` call — dozens of requests per slider interaction. The current design keeps interactive UX on pure client computation.
+
+Also, HTTP 400 responses (e.g. "pool not found" for jettons without a direct TON pool) are no longer retried by `withRetry`, and the pairs cache pre-check avoids issuing the 400 in the first place for jettons that have no direct pair listed in `/v1/markets`. This makes the DevTools Network tab significantly quieter during `priceCoins` on mixed-jetton wallets.
 
 ## Single-source funding only
 
@@ -449,8 +525,9 @@ A few consequences worth internalising:
 type ToncastTxSdkOptions = {
   tonClient?: TonClient;                 // required for jetton flows
   apiClient?: StonApiClient;             // defaults to new StonApiClient()
-  rateCacheTtlMs?: number;               // swap-sim cache TTL, default 5000
-  customPayloadForwardGas?: bigint;      // jetton-leg TON buffer, default 0.1
+  rateCacheTtlMs?: number;               // swap-sim cache TTL, default 5 min (300_000)
+  pairsCacheTtlMs?: number;              // /v1/markets TTL,   default 5 min (300_000)
+  customPayloadForwardGas?: bigint;      // jetton-leg TON buffer, default 0.1 TON
   maxRetries?: number;                   // default 1
   retryDelayMs?: number;                 // default 1000
   rateLimits?: {
@@ -506,11 +583,12 @@ Feasible:
 {
   feasible: true,
   source: "TON" | { address, symbol?, decimals? },
-  txs: TxParams[],                     // exactly one entry
+  estimated: boolean,                  // true for jetton quotes until confirmQuote runs
+  txs: TxParams[],                     // [] for estimated jetton quotes, 1 entry otherwise
   breakdown: { spend: bigint, gas: bigint },
   slippage?: string,
   route?: "direct" | { intermediate: string },
-  warnings?: string[],                 // e.g. "high slippage 4.2%"
+  warnings?: string[],
 }
 ```
 

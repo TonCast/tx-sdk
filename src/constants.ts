@@ -153,5 +153,20 @@ export const DEFAULT_MAX_RETRIES = 1;
 /** Default base delay (ms) between retries; actual delay is `DEFAULT_RETRY_DELAY_MS * (attempt + 1)`. */
 export const DEFAULT_RETRY_DELAY_MS = 1000;
 
-/** Default TTL (ms) for the `simulateSwap` cache. */
-export const DEFAULT_RATE_CACHE_TTL_MS = 5000;
+/**
+ * Default TTL (ms) for the `simulateSwap` / `simulateReverseSwap` cache.
+ * 5 minutes — rate moves within a few percent over that window on the
+ * vast majority of pairs, and `confirmQuote` re-simulates fresh just
+ * before the user signs (the actual on-chain protection against drift).
+ * So a long-lived quote-time cache trades negligible rate staleness for
+ * ~1/60 fewer STON.fi API calls during slider-driven UI interactions.
+ */
+export const DEFAULT_RATE_CACHE_TTL_MS = 300_000;
+
+/**
+ * TTL (ms) for the STON.fi `/v1/markets` pairs-list cache. Pairs rarely
+ * change (only when a new pool is created), so 5 minutes is a safe
+ * default. `priceCoins` with N jettons issues ≤ 1 pairs fetch per TTL
+ * window instead of N.
+ */
+export const PAIRS_CACHE_TTL_MS = 300_000;

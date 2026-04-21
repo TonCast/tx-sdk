@@ -61,7 +61,7 @@ describe("priceCoins", () => {
     expect(priced[0]?.reason).toMatch(/tonClient is required/);
   });
 
-  it("jetton with direct route: viable, netTon = tonEquivalent − direct gas", async () => {
+  it("jetton with direct route: viable, netTon = tonEquivalent (no gas subtraction)", async () => {
     const sim = buildSimulation({
       offerAddress: USDT,
       askAddress: TON_ADDRESS,
@@ -72,6 +72,7 @@ describe("priceCoins", () => {
     });
     const apiClient = createMockApiClient({
       simulations: { [`${USDT}→${TON_ADDRESS}`]: sim },
+      pairs: [[USDT, TON_ADDRESS]],
     });
     const tonClient = {
       open: vi.fn(),
@@ -88,8 +89,13 @@ describe("priceCoins", () => {
     const c = priced[0];
     expect(c?.viable).toBe(true);
     expect(c?.tonEquivalent).toBe(49_500_000_000n);
+    // askUnits (expected, no slippage) is 50 TON; minAskUnits is 49.5 TON.
+    expect(c?.tonEquivalentExpected).toBe(50_000_000_000n);
     expect(c?.gasReserve).toBe(DIRECT_HOP_JETTON_GAS_ESTIMATE);
-    expect(c?.netTon).toBe(49_500_000_000n - DIRECT_HOP_JETTON_GAS_ESTIMATE);
+    // Post-fix: netTon is NOT gas-subtracted — swap gas is billed to the
+    // TON wallet, not to this jetton. netTon equals tonEquivalent (the
+    // pessimistic floor of the swap output).
+    expect(c?.netTon).toBe(49_500_000_000n);
     expect(c?.route).toBe("direct");
     expect(c?.symbol).toBe("USDT");
     expect(c?.decimals).toBe(6);
@@ -136,8 +142,11 @@ describe("priceCoins", () => {
     const c = priced[0];
     expect(c?.viable).toBe(true);
     expect(c?.tonEquivalent).toBe(4_950_000_000n);
+    // leg2.askUnits is 5 TON (expected); minAskUnits is 4.95 (5% slippage).
+    expect(c?.tonEquivalentExpected).toBe(5_000_000_000n);
     expect(c?.gasReserve).toBe(CROSS_HOP_JETTON_GAS_ESTIMATE);
-    expect(c?.netTon).toBe(4_950_000_000n - CROSS_HOP_JETTON_GAS_ESTIMATE);
+    // Post-fix: netTon = tonEquivalent (no gas subtraction).
+    expect(c?.netTon).toBe(4_950_000_000n);
     expect(c?.route).toEqual({ intermediate: USDT });
   });
 
@@ -153,6 +162,7 @@ describe("priceCoins", () => {
     });
     const apiClient = createMockApiClient({
       simulations: { [`${USDT}→${TON_ADDRESS}`]: sim },
+      pairs: [[USDT, TON_ADDRESS]],
     });
     const tonClient = {
       open: vi.fn(),

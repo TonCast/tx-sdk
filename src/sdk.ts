@@ -10,6 +10,7 @@ import {
   DEFAULT_TON_CLIENT_MIN_INTERVAL_MS,
   DEFAULT_WALLET_RESERVE,
   DEX_CUSTOM_PAYLOAD_FORWARD_GAS,
+  PAIRS_CACHE_TTL_MS,
   TON_ADDRESS,
   TON_DIRECT_GAS,
 } from "./constants.js";
@@ -17,6 +18,7 @@ import { ToncastBetError, ToncastNetworkError } from "./errors.js";
 import { planBetOption } from "./planner.js";
 import { priceCoins as priceCoinsImpl } from "./pricing.js";
 import { createRatesClient, type RatesClient } from "./rates.js";
+import { PairsCache } from "./routing/pairsCache.js";
 import { computeFixedBets } from "./strategies/fixed.js";
 import { computeLimitBets } from "./strategies/limit.js";
 import { computeMarketBets } from "./strategies/market.js";
@@ -41,8 +43,18 @@ export type ToncastTxSdkOptions = {
   tonClient?: TonClient;
   /** Optional override of the internal `StonApiClient`. Intended for tests. */
   apiClient?: StonApiClient;
-  /** TTL for the swap-simulation cache. Defaults to 5000 ms. */
+  /**
+   * TTL for the swap-simulation cache. Defaults to
+   * {@link DEFAULT_RATE_CACHE_TTL_MS} (5 minutes). A long value is safe
+   * because `confirmQuote` re-simulates fresh before signing.
+   */
   rateCacheTtlMs?: number;
+  /**
+   * TTL for the `/v1/markets` pairs list cache (used by `discoverRoute`
+   * to avoid refetching ~40K pairs per coin). Defaults to
+   * {@link PAIRS_CACHE_TTL_MS} (5 minutes).
+   */
+  pairsCacheTtlMs?: number;
   /** Override the jetton-swap forward buffer (default 0.1 TON). */
   customPayloadForwardGas?: bigint;
   /** Retries for transient network failures (default 1). */
@@ -73,6 +85,7 @@ export class ToncastTxSdk {
   private readonly tonClient?: TonClient;
   private readonly apiClient: StonApiClient;
   private readonly rates: RatesClient;
+  private readonly pairsCache: PairsCache;
   private readonly tonThrottler: Throttler;
   private readonly stonApiThrottler: Throttler;
   private readonly maxRetries: number;
@@ -102,6 +115,12 @@ export class ToncastTxSdk {
       callStonApi: this.callStonApi.bind(this),
       rateCacheTtlMs: options.rateCacheTtlMs ?? DEFAULT_RATE_CACHE_TTL_MS,
     });
+
+    this.pairsCache = new PairsCache(
+      this.apiClient,
+      this.callStonApi.bind(this),
+      options.pairsCacheTtlMs ?? PAIRS_CACHE_TTL_MS,
+    );
   }
 
   /** @internal */
@@ -154,6 +173,7 @@ export class ToncastTxSdk {
       apiClient: this.apiClient,
       ...(this.tonClient !== undefined && { tonClient: this.tonClient }),
       callStonApi: this.callStonApi.bind(this),
+      pairsCache: this.pairsCache,
     });
   }
 
@@ -376,6 +396,8 @@ export class ToncastTxSdk {
     const oldOption = quote.option;
     const freshOption: BetOption = {
       ...oldOption,
+      // Confirmed: tx is built, estimate flipped off.
+      estimated: false,
       txs: [freshTx],
       breakdown: {
         ...oldOption.breakdown,
@@ -456,9 +478,18 @@ export class ToncastTxSdk {
     };
   }
 
-  /** Drop cached swap simulations (on-demand refresh). */
+  /**
+   * Drop all cached rate and pair data (on-demand refresh).
+   *
+   * Use this after the user clicks a "refresh" control, or between
+   * independent betting sessions if you want to force a brand-new
+   * look at STON.fi's state. `confirmQuote` already clears the
+   * rate cache internally, so this is only needed for manual
+   * pre-`priceCoins` refresh.
+   */
   clearRateCache(): void {
     this.rates.clearCache();
+    this.pairsCache.clear();
   }
 }
 
