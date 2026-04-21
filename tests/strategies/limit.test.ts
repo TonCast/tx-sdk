@@ -260,4 +260,57 @@ describe("computeLimitBets", () => {
       expect(r.totalCost).toBe(25_436_000_000n);
     });
   });
+
+  describe("regression: matched-at-worstYesOdds is preserved in breakdown", () => {
+    // User report from a NO, worstYesOdds=2 case: 2 tickets matched at
+    // yesOdds=2 + 710 placement tickets at yesOdds=2. The `bets` array is
+    // merged (for fee-efficient on-chain submission), but `breakdown` MUST
+    // keep both legs separate so UIs can render "matching" and "place"
+    // line items correctly. A bug in consumer UIs that reads `bets` instead
+    // of `breakdown` is out of scope for the SDK.
+    it("exposes 2-tickets matched + 710-tickets placement via breakdown", () => {
+      const s: OddsState = {
+        Yes: new Array(ODDS_COUNT).fill(0) as number[],
+        No: new Array(ODDS_COUNT).fill(0) as number[],
+      };
+      s.Yes[0] = 2; //  yesOdds=2,  2 YES tickets (last matched slot)
+      s.Yes[1] = 5; //  yesOdds=4,  5 YES tickets
+      s.Yes[19] = 200; // yesOdds=40, 200 YES tickets
+      s.Yes[20] = 83; //  yesOdds=42, 83 YES tickets
+
+      const r = computeLimitBets({
+        oddsState: s,
+        isYes: false,
+        worstYesOdds: 2,
+        ticketsCount: 1000,
+      });
+
+      // `bets` is merged: the 2 matched + 710 placement at yesOdds=2 fold
+      // into a single `{2, 712}` entry, saving 0.1 TON on execution fees.
+      expect(r.bets).toEqual([
+        { yesOdds: 2, ticketsCount: 712 },
+        { yesOdds: 4, ticketsCount: 5 },
+        { yesOdds: 40, ticketsCount: 200 },
+        { yesOdds: 42, ticketsCount: 83 },
+      ]);
+
+      // The split survives intact in `breakdown`:
+      expect(r.breakdown.matched.at(-1)).toEqual({
+        yesOdds: 2,
+        tickets: 2,
+        cost: 100_000_000n + 2n * 98_000_000n, // 0.1 + 0.196 = 0.296 TON
+      });
+      expect(r.breakdown.unmatched).toEqual({
+        yesOdds: 2,
+        tickets: 710,
+        cost: 100_000_000n + 710n * 98_000_000n, // 0.1 + 69.58 = 69.68 TON
+      });
+
+      // Total = 4 merged entries × 0.1 fee + ticket stake
+      // = 0.4 + (712·0.098 + 5·0.096 + 200·0.060 + 83·0.058)
+      // = 0.4 + (69.776 + 0.48 + 12 + 4.814)
+      // = 87.47 TON.
+      expect(r.totalCost).toBe(87_470_000_000n);
+    });
+  });
 });

@@ -32,7 +32,21 @@ export type StrategyResult = {
  * coefficient (lowest yesOdds for a YES user) up to `worstYesOdds`, then
  * place any unmatched remainder as a fresh bet at `worstYesOdds`.
  *
- * Entries sharing a yesOdds are merged before returning.
+ * ## Output shape
+ *
+ * `bets` is the merged, on-chain-ready array (duplicates at the same
+ * yesOdds folded via {@link mergeSameOdds} to save 0.1 TON per extra
+ * execution fee). The full matched/placement decomposition — including the
+ * case where the placement lands on a yesOdds that already matched some
+ * counter-liquidity — is preserved in `breakdown`:
+ *
+ * - `breakdown.matched` — one entry per walked yesOdds that consumed
+ *   counter-side liquidity (may include an entry at `worstYesOdds`).
+ * - `breakdown.unmatched` — the placement leg, always at `worstYesOdds`,
+ *   absent when every ticket got matched.
+ *
+ * UI code should source match/placement line items from `breakdown`, not
+ * try to reconstruct them from `bets`.
  */
 export function computeLimitBets(input: LimitStrategyInput): StrategyResult {
   const { oddsState, isYes, worstYesOdds, ticketsCount } = input;
