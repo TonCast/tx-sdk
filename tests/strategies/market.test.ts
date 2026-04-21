@@ -44,19 +44,20 @@ describe("computeMarketBets", () => {
     expect(result.feasible).toBe(true);
     if (!result.feasible) throw new Error("unreachable");
 
-    // Matched: {54,17}, {56,100}, {58,200}. Placement extends 58.
-    // Expected merged bets.
+    // Matched: {54,17}, {56,100}, {58,200}. Placement extends the CHEAPEST
+    // matched entry for YES — which is yesOdds=54 (the first matched in
+    // the ASC walk). The merged bets entry at 54 therefore inflates from
+    // 17 to (17 + placement tickets).
     const [b0, b1, b2] = result.bets;
     expect(b0?.yesOdds).toBe(54);
-    expect(b0?.ticketsCount).toBe(17);
+    expect(b0?.ticketsCount).toBeGreaterThan(17); // placement folded in
     expect(b1?.yesOdds).toBe(56);
     expect(b1?.ticketsCount).toBe(100);
     expect(b2?.yesOdds).toBe(58);
-    // Placement tickets should add a large amount to b2.
-    expect(b2?.ticketsCount).toBeGreaterThan(200);
+    expect(b2?.ticketsCount).toBe(200);
 
     expect(result.breakdown.matched).toHaveLength(3);
-    expect(result.breakdown.placement?.yesOdds).toBe(58);
+    expect(result.breakdown.placement?.yesOdds).toBe(54);
   });
 
   it("budget too small for any entry → feasible=false", () => {
@@ -136,17 +137,17 @@ describe("computeMarketBets", () => {
     expect(result.feasible).toBe(true);
     if (!result.feasible) throw new Error("unreachable");
 
-    // At minimum the NO user should have fully consumed the 100 @
-    // yesOdds=98 liquidity — if the buggy direction was active, he'd get
-    // about 5 tickets total at yesOdds=2.
+    // All 100 @ yesOdds=98 consumed first (0.3 TON). Then 2 tickets @
+    // yesOdds=2 eat 0.1 fee + 2·0.098 = 0.296 TON, leaving 0.004 TON.
+    // Placement goes back to FIRST matched (yesOdds=98, cheapest for NO),
+    // buying 0.004 / 0.002 = 2 extra tickets. Merged entry at 98 = 102.
     const entryAt98 = result.bets.find((b) => b.yesOdds === 98);
-    expect(entryAt98?.ticketsCount).toBe(100);
-    // Total tickets should be ≥ 100 — enforcing the cheapest-first rule.
+    expect(entryAt98?.ticketsCount).toBe(102);
     const totalTickets = result.bets.reduce((s, b) => s + b.ticketsCount, 0);
-    expect(totalTickets).toBeGreaterThanOrEqual(100);
+    expect(totalTickets).toBe(104); // 102 @ 98 + 2 @ 2
   });
 
-  it("NO user: placement extends lastYesOdds (cheapest matched)", () => {
+  it("NO user: placement extends firstYesOdds (cheapest matched) — single-level state", () => {
     const s = emptyOddsState();
     s.Yes[yesOddsToIndex(90)] = 10;
     const result = computeMarketBets({
@@ -155,11 +156,55 @@ describe("computeMarketBets", () => {
       maxBudgetTon: 2_000_000_000n, // 2 TON
     });
     if (!result.feasible) throw new Error("unreachable");
-    // Matched 10 @ yesOdds=90, then placement extends yesOdds=90 with the
-    // remaining budget.
+    // Only one level matched (yesOdds=90) so firstYesOdds == lastYesOdds;
+    // placement lands there regardless of the anchor policy.
     expect(result.bets).toHaveLength(1);
     expect(result.bets[0]?.yesOdds).toBe(90);
     expect(result.breakdown.placement?.yesOdds).toBe(90);
+  });
+
+  it("NO user: placement on FIRST matched maximises tickets vs LAST matched", () => {
+    // Regression for the placement-anchor change. User's state: YES-side
+    // liquidity scattered across yesOdds={2, 4, 40, 42} with counts
+    // {2, 5, 200, 83}. A NO user with 1000 TON budget walking DESC hits
+    // liquidity in order 42 → 40 → 4 → 2. After all 290 matched tickets
+    // are consumed (cost ≈ 17.89 TON), ~982 TON remain.
+    //
+    //   OLD behaviour (lastYesOdds = 2, price 0.098 TON/ticket):
+    //     placement ≈ 982 / 0.098 ≈ 10 021 tickets
+    //   NEW behaviour (firstYesOdds = 42, price 0.058 TON/ticket):
+    //     placement ≈ 982 / 0.058 ≈ 16 933 tickets  →  +69 % for the user
+    //
+    // The test pins the new 16 933-tickets path so the saving doesn't
+    // silently regress.
+    const s = emptyOddsState();
+    s.Yes[0] = 2;
+    s.Yes[1] = 5;
+    s.Yes[19] = 200;
+    s.Yes[20] = 83;
+
+    const r = computeMarketBets({
+      oddsState: s,
+      isYes: false,
+      maxBudgetTon: 1_000_000_000_000n, // 1000 TON
+    });
+    if (!r.feasible) throw new Error("unreachable");
+
+    // Placement anchored to first matched = yesOdds 42.
+    expect(r.breakdown.placement?.yesOdds).toBe(42);
+    expect(r.breakdown.placement?.tickets).toBe(16932);
+
+    const entryAt42 = r.bets.find((b) => b.yesOdds === 42);
+    // 83 matched + 16 932 placement = 17 015 merged at yesOdds=42.
+    expect(entryAt42?.ticketsCount).toBe(17015);
+
+    // Compare to what the OLD anchor would have produced as a sanity
+    // check: ~10 021 placement tickets at yesOdds=2 → total ≈ 10 230.
+    // The NEW total must be strictly larger (and in fact ~68 % larger).
+    const total = r.bets.reduce((acc, b) => acc + b.ticketsCount, 0);
+    // 2@2 + 5@4 + 200@40 + 17015@42 = 17 222 tickets.
+    expect(total).toBe(17222);
+    expect(total).toBeGreaterThan(10023 + 5 + 200 + 2); // old behaviour total
   });
 
   it("breakdownTotals contract holds when Market placement merges into matched", async () => {

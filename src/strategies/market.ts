@@ -39,8 +39,27 @@ export type MarketStrategyResult =
 
 /**
  * Market mode — spend up to `maxBudgetTon` greedily on the best available
- * counter-side liquidity, then place the remainder at the last matched
- * yesOdds (or at {@link ODDS_DEFAULT_PLACEMENT} = 50 if nothing matched).
+ * counter-side liquidity, then (if budget is left over AND all reachable
+ * liquidity got matched) park the remainder at the FIRST matched yesOdds
+ * — the cheapest per-ticket price on the user's side. Fallback to
+ * {@link ODDS_DEFAULT_PLACEMENT} = 50 when nothing matched at all.
+ *
+ * ## Why FIRST matched, not LAST
+ *
+ * A NO user walks yesOdds DESC (98 → 2) because NO `ticketCost =
+ * (100 − yesOdds)·WIN/100` is cheaper at higher yesOdds. The FIRST
+ * successful match therefore sits at the HIGHEST matched yesOdds, which is
+ * also the CHEAPEST price per NO-ticket. Symmetrically for YES, the first
+ * match is at the LOWEST matched yesOdds — the cheapest YES-ticket.
+ *
+ * Previous behaviour parked the remainder at `lastYesOdds` which, by the
+ * walk order, is the MOST EXPENSIVE price seen — it saved one 0.1 TON
+ * execution fee via `mergeSameOdds` but forced the user to pay a
+ * significantly worse per-ticket price. On a 1000 TON NO budget with
+ * liquidity at yesOdds∈{2, 4, 40, 42} that single trade-off cost ~69% of
+ * potential tickets (16 933 vs 10 021). FIRST-matched placement keeps the
+ * fee saving intact (merge folds the placement into the first matched
+ * entry at the same yesOdds) AND maximises tickets for the budget.
  *
  * All ticket-count arithmetic is in `bigint` because the Market mode can
  * easily generate millions of tickets on large budgets.
@@ -62,7 +81,10 @@ export function computeMarketBets(
   let remainingBudget = maxBudgetTon;
   const preMerge: BetItem[] = [];
   const matched: StrategyBreakdown["matched"] = [];
-  let lastYesOdds: number | null = null;
+  // `firstYesOdds` anchors the placement to the CHEAPEST matched price
+  // (see JSDoc). Only set on the first successful match and never updated
+  // afterwards.
+  let firstYesOdds: number | null = null;
 
   // Walk yesOdds in "best → worst" order for the user's side:
   //   YES user:  ticketCost = WIN * yesOdds / 100 → smallest yesOdds is
@@ -105,12 +127,12 @@ export function computeMarketBets(
       cost: entryCost,
     });
     remainingBudget -= entryCost;
-    lastYesOdds = yesOdds;
+    if (firstYesOdds === null) firstYesOdds = yesOdds;
   }
 
   let placement: StrategyBreakdown["placement"];
 
-  if (lastYesOdds === null) {
+  if (firstYesOdds === null) {
     // Nothing matched → fallback placement on the neutral 50% yesOdds.
     const fallbackYesOdds = ODDS_DEFAULT_PLACEMENT;
     const fallbackPrice = ticketCost(fallbackYesOdds, isYes);
@@ -140,22 +162,23 @@ export function computeMarketBets(
       cost,
     };
   } else if (remainingBudget > 0n) {
-    // Remaining budget goes onto the last matched yesOdds. No extra
-    // PARI_EXECUTION_FEE because mergeSameOdds will fold it into the
-    // existing `lastYesOdds` entry — the execution fee was already paid
-    // by the matched entry at this yesOdds.
-    const price = ticketCost(lastYesOdds, isYes);
+    // Remaining budget goes onto the FIRST matched yesOdds (cheapest per
+    // ticket for the user's side — see the JSDoc for the full rationale).
+    // No extra PARI_EXECUTION_FEE because mergeSameOdds will fold it into
+    // the existing `firstYesOdds` entry — the execution fee was already
+    // paid by the matched entry at this yesOdds.
+    const price = ticketCost(firstYesOdds, isYes);
     if (price > 0n) {
       const extra = remainingBudget / price;
       if (extra > 0n) {
         const MAX_TICKETS = 0xffffffffn;
-        // After mergeSameOdds the combined entry at `lastYesOdds` is
+        // After mergeSameOdds the combined entry at `firstYesOdds` is
         // capped by uint32 on-chain. Account for tickets already queued
         // in `preMerge` at the same yesOdds so the merged count cannot
         // overflow `validateBetParams`'s INVALID_TICKETS_COUNT check.
         let alreadyAtOdds = 0n;
         for (const entry of preMerge) {
-          if (entry.yesOdds === lastYesOdds) {
+          if (entry.yesOdds === firstYesOdds) {
             alreadyAtOdds += BigInt(entry.ticketsCount);
           }
         }
@@ -165,11 +188,11 @@ export function computeMarketBets(
         const finalExtra = capByExtra > headroom ? headroom : capByExtra;
         if (finalExtra > 0n) {
           preMerge.push({
-            yesOdds: lastYesOdds,
+            yesOdds: firstYesOdds,
             ticketsCount: Number(finalExtra),
           });
           placement = {
-            yesOdds: lastYesOdds,
+            yesOdds: firstYesOdds,
             tickets: Number(finalExtra),
             cost: price * finalExtra,
           };

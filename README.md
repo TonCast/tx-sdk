@@ -296,7 +296,7 @@ For example, `No[17] = 200` means "200 NO tickets sitting at NO-prob 36% = cheap
 
 ### Market
 
-Spend `maxBudgetTon` greedily on the best counter-side liquidity, placement at the last matched yesOdds (or 50% if nothing matched).
+Spend `maxBudgetTon` greedily on the best counter-side liquidity, then park any residual budget on the **first matched** yesOdds — the cheapest per-ticket price on the user's side (falling back to 50% if nothing matched). This maximises tickets per TON spent; earlier versions anchored the placement to `lastYesOdds` (the most expensive matched), which could cost the user 60 %+ of tickets on a scattered order book.
 
 ```ts
 await txSDK.quoteMarketBet({
