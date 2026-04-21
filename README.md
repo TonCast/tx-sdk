@@ -14,15 +14,20 @@
 - [Installation](#installation)
 - [Flow overview](#flow-overview)
 - [Quick start](#quick-start)
+- [Common parameters](#common-parameters)
+- [Betting on behalf of another user](#betting-on-behalf-of-another-user)
 - [Bet modes](#bet-modes)
 - [Pricing and viability filtering](#pricing-and-viability-filtering)
 - [Confirming a quote before signing](#confirming-a-quote-before-signing)
 - [Single-source funding only](#single-source-funding-only)
+- [Subscriptions](#subscriptions)
+- [How TON flows in a jetton bet](#how-ton-flows-in-a-jetton-bet)
 - [Public API reference](#public-api-reference)
 - [Result types](#result-types)
 - [Errors](#errors)
 - [Configuration](#configuration)
 - [Constants](#constants)
+- [Troubleshooting](#troubleshooting)
 - [REQUIREMENT FOR AI AGENTS](#requirement-for-ai-agents)
 - [License](#license)
 
@@ -150,6 +155,94 @@ if (fresh.option.feasible) {
 }
 ```
 
+## Common parameters
+
+All three `quoteXxxBet` methods share the same base set of fields via `CommonBetParams`:
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `pariAddress` | `string` | **yes** | Address of the target Pari market contract on-chain. |
+| `beneficiary` | `string` | **yes** | Address that will **own** the placed tickets on-chain. If the bet wins, payouts go here. Usually this is the end user's wallet. |
+| `senderAddress` | `string` | no (defaults to `beneficiary`) | Address that will **sign** the transaction (the wallet connected via TonConnect). Different from `beneficiary` only when placing a bet on behalf of someone else — see [Betting on behalf of another user](#betting-on-behalf-of-another-user). |
+| `isYes` | `boolean` | **yes** | `true` → YES side, `false` → NO side. |
+| `referral` | `string \| null` | **yes** | Optional referral address. Must be `null` if `referralPct === 0`, and must be non-null + different from `beneficiary` if `referralPct > 0`. |
+| `referralPct` | `number` (0..7) | **yes** | Referral share in percent. `0` disables. Validated on-chain as `uint3`, so the max is 7. |
+| `source` | `string` | **yes** | Address of the coin to fund the bet with (`TON_ADDRESS` or a jetton master address). Must be present in `pricedCoins` and `viable`. |
+| `pricedCoins` | `PricedCoin[]` | **yes** | Output of `txSDK.priceCoins(...)`. Must include the `source`; other entries are ignored. |
+| `slippage` | `string` | no (default `"0.05"`) | Max acceptable per-leg STON.fi price-impact as a decimal string. `"0.05"` = 5%. |
+| `walletReserve` | `bigint` | no (default `0.05 TON`) | TON kept on the wallet after all transactions complete. Safety floor to make sure the wallet stays functional. |
+
+Plus mode-specific fields:
+
+- **Fixed**: `yesOdds: number` (2..98 even), `ticketsCount: number`.
+- **Limit**: `oddsState: OddsState`, `worstYesOdds: number`, `ticketsCount: number`.
+- **Market**: `oddsState: OddsState`, `maxBudgetTon: bigint`.
+
+## Betting on behalf of another user
+
+Useful for agent / concierge / gift flows where the wallet signing the transaction is **not** the owner of the resulting tickets. By default `senderAddress` defaults to `beneficiary` — the common case where one person bets for themselves. To bet on behalf of someone else, pass both explicitly:
+
+```ts
+const quote = await txSDK.quoteFixedBet({
+  pariAddress: PARI,
+  beneficiary: "UQDr92G-zeVDGAi-1xzsOVDAdy9jwoHwxNYPG7AGnuiNfkR8",   // the RECIPIENT of tickets
+  senderAddress: "UQAREREREREREREREREREREREREREREREREREREREREREbvW", // the SIGNING wallet
+  isYes: true,
+  yesOdds: 56,
+  ticketsCount: 10,
+  referral: null,
+  referralPct: 0,
+  source: USDT,
+  pricedCoins: await txSDK.priceCoins({
+    availableCoins: [{ address: USDT, amount: 50_000_000n }],  // sender's USDT
+  }),
+});
+```
+
+Two critical effects of splitting `senderAddress` and `beneficiary`:
+
+1. **On-chain ownership**. The `BatchPlaceBetsForWithRef` message carries `beneficiary` as the ticket owner. If the market resolves in your favour, Pari sends the payout to `beneficiary`, not to the signer. The signer funds, the beneficiary owns.
+2. **Jetton flow** routing. When the bet is funded from a jetton, the STON.fi router must derive the correct jetton-wallet to pull tokens from. The SDK passes `senderAddress` to STON.fi as `userWalletAddress`. Passing `beneficiary` here would route through the **beneficiary's** jetton wallet, which the signer's wallet cannot authorise → swap fails at the first hop. The SDK gets this right as long as you pass `senderAddress` explicitly.
+
+### Flow diagram
+
+```text
+                           ┌────────────────────────────────┐
+ [signer's wallet]         │ @toncast/tx-sdk                │
+ (= senderAddress)         │                                │
+                           │ buildJettonBetTx({             │
+ holds jettons for swap ───▶     senderAddress: signer,     │
+                           │     beneficiary:  recipient,   │
+                           │     ...                        │
+                           │ })                             │
+                           └───────────────┬────────────────┘
+                                           │
+                                 STON.fi swap JETTON → TON
+                                           │
+                                           ▼
+                                 Toncast proxy
+                                           │
+                                 BatchPlaceBetsForWithRef
+                                 with beneficiary = recipient
+                                           │
+                                           ▼
+                                 Pari market contract
+                                           │
+                                 tickets owned by RECIPIENT ← ticket receiver
+                                           │
+                                 change returns to `refund_address` on swap path
+                                 → by STON.fi convention this is the signer's wallet
+```
+
+### Practical notes
+
+- **TonConnect flow**: the TonConnect session on your app is bound to the signing wallet. `senderAddress` **must** be that wallet's address; `beneficiary` can be any other valid TON address.
+- **Jetton balance check**: `priceCoins` must be called with the **signer's** coins — the signer is the one who actually parts with jettons. Passing the beneficiary's coins would produce a quote that looks viable but fails on-chain because the signer doesn't own those tokens.
+- **Referral constraint**: `referral` must not equal `beneficiary` (enforced by `REFERRAL_EQUALS_BENEFICIARY` check). It **can** equal `senderAddress` — the signer / agent can self-refer the bet and collect the referral share.
+- **TON-direct path** (no swap): the distinction between signer and beneficiary still applies to ticket ownership, but no STON.fi routing is involved. `buildTonBetTx` uses `beneficiary` for tickets and ignores `senderAddress` (any TON in the signed message comes from whoever signs — TonConnect already knows who that is).
+
+See `examples/bet-on-behalf.ts` for a self-contained runnable sample.
+
 ## Bet modes
 
 All three modes produce a `BetQuote` with the same shape — only how `bets[]` is composed differs.
@@ -255,6 +348,98 @@ Every successful quote emits **exactly one transaction** funded by **one source*
 - No partial-fill risk: either the one swap succeeds and the bet is placed, or nothing happens and the user retries with a different source.
 
 If no single viable source covers the bet, the quote is returned `feasible: false` with `reason: "insufficient_balance"` and a `shortfall` in nano-TON. The user must top up the chosen coin (or pre-swap to TON in another wallet) and quote again.
+
+## Subscriptions
+
+For live-updating UIs (Market / Limit sliders where the user drags amounts and the quote needs to refresh every few seconds), use the `subscribeXxxBet` helpers. They wrap `quoteXxxBet` in a polling loop with abort support:
+
+```ts
+import { subscribeMarketBet } from "@toncast/tx-sdk";
+
+const subscription = subscribeMarketBet(
+  txSDK,
+  {
+    pariAddress: PARI,
+    beneficiary: BENEFICIARY,
+    isYes: true,
+    oddsState,
+    maxBudgetTon: 5_000_000_000n,
+    referral: null,
+    referralPct: 0,
+    source: TON_ADDRESS,
+    pricedCoins,
+  },
+  (quote) => {
+    // Called with each fresh BetQuote. Re-render your UI here.
+    setQuote(quote);
+  },
+  {
+    intervalMs: 3000,                    // default 3000
+    signal: abortController.signal,      // optional — cancel loop externally
+    onError: (err) => console.warn(err), // optional — errors do NOT stop the loop
+  },
+);
+
+// Stop when the user navigates away / closes the bet UI.
+subscription.stop();
+await subscription.done;
+```
+
+The underlying rate cache (`rateCacheTtlMs`, default 5s) keeps STON.fi traffic bounded even at short poll intervals — two consecutive `simulateSwap` calls with the same `offerUnits` / `slippage` reuse the cached response. Invalidate manually with `txSDK.clearRateCache()` if you need an immediate refresh.
+
+Three subscription variants mirror the three quote methods:
+
+| Helper | Wraps | Use for |
+| --- | --- | --- |
+| `subscribeFixedBet` | `quoteFixedBet` | Rarely — Fixed parameters don't change; mostly for dev / debug. |
+| `subscribeLimitBet` | `quoteLimitBet` | Limit-mode UI with a live `oddsState` feed. |
+| `subscribeMarketBet` | `quoteMarketBet` | Market-mode slider UIs. |
+
+## How TON flows in a jetton bet
+
+A worked-through example of where each TON goes, for a concrete real-world bet (STON→TON direct swap, 80 tickets at yesOdds=54, side=NO, totalCost = 3.78 TON):
+
+```text
+Your wallet signs ONE outgoing JettonTransfer:
+  Value:              0.3 TON   ← STON.fi's recommended gas_budget from the API
+  jetton amount:      17.34 STON
+  forward_ton_amount: 0.24 TON  ← STON.fi's recommended forward_gas
+  forward_payload     carries:  { min_out: 3.78 TON, custom_payload: <ProxyForward> }
+
+0.3 TON breakdown during execution:
+  ├─ ~0.06 TON            returned as excess from your jetton wallet
+  └─ 0.24 TON             forwarded to STON.fi router with the jetton
+
+STON.fi router performs the swap:
+  17.34 STON  →  3.9789 TON   (actual pool delivery; must be ≥ min_out)
+
+pTON unwraps swap output and sends to Toncast proxy:
+  value = ton_amount + fwd_gas = 3.9789 + 0.1 = 4.0789 TON
+                                       ↑
+                                       DEX_CUSTOM_PAYLOAD_FORWARD_GAS (our constant)
+
+Toncast proxy receives 4.0789 TON:
+  checks msgValue ≥ totalCost + CONTRACT_RESERVE  (3.78 + 0.01 = 3.79)  ✓
+  forwards to Pari:       3.78 TON   (= totalCost exactly, funds the bet)
+  keeps on contract:      0.01 TON   (CONTRACT_RESERVE for storage)
+  change to your wallet:  0.29 TON   (msgValue − totalCost − reserve)
+```
+
+Net outcome:
+
+```
+Spent:  17.34 STON  → 3.78 TON on a Pari bet
+Received back in TON: ~0.06 TON (jetton-wallet excess) + 0.29 TON (proxy change)
+                    = ~0.35 TON of your original 0.3 TON outgoing value survived
+                      (plus the ~3.78 TON you now have as a bet position)
+```
+
+A few consequences worth internalising:
+
+- **The SDK never "eats" TON** — every TON you sign for either goes into the bet on Pari or returns to your wallet as change / excess. Forward fees (~0.001 TON per internal message) are the only unavoidable loss.
+- **`DEX_CUSTOM_PAYLOAD_FORWARD_GAS = 0.1 TON`** is a slippage safety buffer, not a tip. It ensures that even if the swap delivers the absolute minimum (`minAskAmount = totalCost`), the proxy still has `totalCost + 0.1 ≥ totalCost + 0.01` and can forward. Without it, any real-world execution gas would push us below `CONTRACT_RESERVE` and the proxy would refund instead.
+- **`minAskAmount = totalCost`** (not `totalCost × (1 − slippage)`) — see the DEX-level floor discussion under [Single-source funding only](#single-source-funding-only). This guarantees the proxy never receives a swap output below Pari's requirement, so refunds from the proxy are structurally impossible on successful swaps.
+- **Rejected swaps** (pool moves too far against us): the DEX reverts, your jetton stays in your wallet, zero gas wasted on the Pari path. The bet simply doesn't happen — you retry with fresh rates via `confirmQuote` or a new `quoteXxxBet` call.
 
 ## Public API reference
 
@@ -387,6 +572,44 @@ For bundle-size minimisation, the package exposes two subpath exports:
 - `@toncast/tx-sdk/planner` — the `planBetOption` implementation.
 
 Most integrators should just use the root `@toncast/tx-sdk` import.
+
+## Troubleshooting
+
+### `priceCoins` logs `400 Bad Request "1010: Could not find pool address"` in the console
+
+Normal. This happens when a jetton has no **direct** pool with TON on STON.fi. The SDK catches the 400, falls through to 2-hop discovery via `/v1/markets`, and finds a `jetton → intermediate → TON` route. `priceCoins` still returns `viable: true` with `route: { intermediate: <address> }`. The 400 gets logged by the underlying HTTP library; functionally everything works. `withRetry` does **not** retry 400 responses (see `src/utils/retry.ts`), so there's no extra network traffic — just one log line.
+
+### Quote returns `feasible: false, reason: "source_not_viable"`
+
+The coin you picked as `source` was flagged `viable: false` in `pricedCoins`. That means swapping it in would cost more in gas than the swap delivers in TON. Inspect `pricedCoin.reason` for the specific cause (tiny jetton balance, no route, tonClient missing). Pick a different source.
+
+### Quote returns `feasible: false, reason: "insufficient_balance"`
+
+The source's `netTon` (after slippage-adjusted swap math) is below `totalCost`. `BetOption.shortfall` tells you in nano-TON how much more TON-equivalent the user would need to top up the selected coin with. No single other coin? The user must pre-consolidate in their wallet and try again — the SDK does not do multi-source funding.
+
+### Quote returns `feasible: false, reason: "slippage_exceeds_limit"`
+
+STON.fi projected `priceImpact` across the route exceeds `slippage` (default 5%). Either raise `slippage` in the quote params, or wait for the pool to recover, or pick a deeper-liquidity source.
+
+### `confirmQuote` throws `SLIPPAGE_DRIFTED`
+
+Between quote time and confirm time (typically seconds to minutes), the pool moved enough that a fresh simulation now reports `priceImpact > slippage`. UI should catch this, show the new rate to the user, and re-quote on explicit confirmation.
+
+### `npm install` warns about peer deps `@ston-fi/api` / `@ston-fi/sdk` / `@ton/ton`
+
+These are declared as **dependencies** (not peer dependencies) in `package.json`, so they install automatically. If you see warnings, it likely means a **version conflict** between the SDK's required version and what your host project has pinned. Options:
+- Use `npm install` with `--legacy-peer-deps` to accept the mismatch (risky — may cause runtime bugs if APIs drifted).
+- Align versions in your host project.
+- Open an issue with both version numbers so the SDK's range can be widened in a patch release.
+
+### `buildJettonBetTx` works locally but fails on-chain with a proxy refund
+
+Since v0.1.0 this should be structurally impossible on successful swaps — the SDK sets `minAskAmount = totalCost` so the DEX reverts (rather than delivers under-target) before the proxy ever sees the message. If you see a proxy refund anyway, likely causes:
+
+1. **Stale `TONCAST_PROXY_ADDRESS`** — the hardcoded proxy was redeployed on-chain and the SDK version you're on still points to the old one. Check the current proxy against `src/constants.ts`.
+2. **Non-standard `bets` encoding** — the on-chain proxy (`toncast_swap_proxy.tolk`) iterates `bets` via `createMapFromLowLevelDict<uint8, cell>`, expecting **ref-per-entry** encoding. The SDK writes exactly that; if you're using a patched version that writes inline BetItem, the proxy catches the "No more references" exception and refunds. `tests/proxy-compatibility.test.ts` locks this invariant — do not revert.
+
+Send the failing tx hash to the issue tracker; the maintainer can diff the payload against the current proxy schema.
 
 ## REQUIREMENT FOR AI AGENTS
 
