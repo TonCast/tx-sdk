@@ -287,6 +287,13 @@ await txSDK.quoteLimitBet({
 });
 ```
 
+**OddsState indexing convention** — each side is indexed by **its own-side probability**, not by yesOdds:
+
+- `Yes[i]` — YES orders at yesOdds (= YES-probability) `2·(i+1)`. Direct: index `yesOddsToIndex(yesOdds)`.
+- `No[i]` — NO orders at NO-probability `2·(i+1)`, which equals yesOdds `100 − 2·(i+1)`. Complementary: index `yesOddsToIndex(100 − yesOdds)`.
+
+For example, `No[17] = 200` means "200 NO tickets sitting at NO-prob 36% = cheap NO tickets at Pari yesOdds **64**" — *not* at yesOdds 36. A YES bet at yesOdds=64 will match this pool; a YES bet at yesOdds=36 will not. The SDK's `availableTickets(state, isYes, yesOdds)` helper hides this asymmetry — use it instead of indexing arrays manually.
+
 ### Market
 
 Spend `maxBudgetTon` greedily on the best counter-side liquidity, placement at the last matched yesOdds (or 50% if nothing matched).

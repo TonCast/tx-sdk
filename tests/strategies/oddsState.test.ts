@@ -57,13 +57,28 @@ describe("indexToYesOdds / yesOddsToIndex", () => {
 });
 
 describe("availableTickets", () => {
-  it("YES user consumes NO tickets at the same yesOdds index", () => {
+  it("YES user reads NO via complementary index (NO-prob = 100 − yesOdds)", () => {
+    // Convention: `No[i]` stores NO orders at NO-probability 2*(i+1), i.e.
+    // Pari yesOdds = 100 − 2*(i+1). So a NO order matchable at Pari
+    // yesOdds=56 sits at index `yesOddsToIndex(100 − 56) = yesOddsToIndex(44)`.
+    // YES-side is indexed directly by yesOdds.
     const state = emptyOddsState();
-    state.No[yesOddsToIndex(56)] = 100;
+    state.No[yesOddsToIndex(100 - 56)] = 100; // → matchable at yesOdds=56
     state.Yes[yesOddsToIndex(56)] = 42;
 
     expect(availableTickets(state, true, 56)).toBe(100);
     expect(availableTickets(state, false, 56)).toBe(42);
+  });
+
+  it("YES lookup at same numeric index does NOT collide with NO lookup", () => {
+    // Regression guard: before the complementary-index fix, putting `N` at
+    // `No[yesOddsToIndex(X)]` accidentally satisfied `availableTickets(..,
+    // true, X)`. After the fix, it instead satisfies `availableTickets(..,
+    // true, 100 − X)` — proving the two lookups use different cells.
+    const state = emptyOddsState();
+    state.No[yesOddsToIndex(36)] = 200; // NO-prob 36% → Pari yesOdds 64
+    expect(availableTickets(state, true, 64)).toBe(200);
+    expect(availableTickets(state, true, 36)).toBe(0);
   });
 
   it("throws on negative cell (no silent coercion to 0)", () => {
@@ -88,7 +103,7 @@ describe("availableTickets", () => {
 
   it("throws on fractional cell (no silent truncation)", () => {
     const state = emptyOddsState();
-    state.No[yesOddsToIndex(40)] = 7.9;
+    state.No[yesOddsToIndex(100 - 40)] = 7.9; // matchable at yesOdds=40
     expect(() => availableTickets(state, true, 40)).toThrow(ToncastBetError);
   });
 });
@@ -144,7 +159,7 @@ describe("availableTickets (strict on bad cells)", () => {
     // Regression for Bug 9: defense-in-depth for callers that skip
     // validateOddsState upfront — don't silently hide -1 as 0.
     const s = emptyOddsState();
-    s.No[yesOddsToIndex(56)] = -5;
+    s.No[yesOddsToIndex(100 - 56)] = -5;
     try {
       availableTickets(s, true, 56);
       throw new Error("expected throw");
@@ -157,7 +172,7 @@ describe("availableTickets (strict on bad cells)", () => {
 
   it("returns the stored integer when cell is valid", () => {
     const s = emptyOddsState();
-    s.No[yesOddsToIndex(56)] = 100;
+    s.No[yesOddsToIndex(100 - 56)] = 100;
     expect(availableTickets(s, true, 56)).toBe(100);
   });
 });

@@ -92,8 +92,11 @@ describe("ToncastTxSdk.quoteLimitBet", () => {
   it("produces feasible quote with merged entries", async () => {
     const sdk = makeSdk();
     const state = emptyOddsState();
-    state.No[26] = 17;
-    state.No[27] = 100;
+    // NO orders matchable at yesOdds=54 live at No[yesOddsToIndex(46)] = No[22]
+    // and NO orders matchable at yesOdds=56 live at No[yesOddsToIndex(44)] = No[21]
+    // under the complementary-NO-index convention (see oddsState.ts).
+    state.No[22] = 17;
+    state.No[21] = 100;
 
     const quote = await sdk.quoteLimitBet({
       pariAddress: PARI,

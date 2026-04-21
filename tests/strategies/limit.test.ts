@@ -12,12 +12,19 @@ function emptyOddsState(): OddsState {
   };
 }
 
+/**
+ * Seed NO orders matchable against a YES bet at the given Pari yesOdds.
+ *
+ * The `No` array is indexed by NO-probability (= 100 − yesOdds), so a NO
+ * order matchable at Pari yesOdds=X lives at `No[yesOddsToIndex(100 − X)]`.
+ * See the `availableTickets` JSDoc for the full convention.
+ */
 function stateWithNo(
   entries: Array<{ yesOdds: number; tickets: number }>,
 ): OddsState {
   const s = emptyOddsState();
   for (const e of entries) {
-    s.No[yesOddsToIndex(e.yesOdds)] = e.tickets;
+    s.No[yesOddsToIndex(100 - e.yesOdds)] = e.tickets;
   }
   return s;
 }
@@ -183,5 +190,74 @@ describe("computeLimitBets", () => {
         ticketsCount: 10,
       }),
     ).toThrow(ToncastBetError);
+  });
+
+  describe("regression: YES side uses complementary No-array lookup", () => {
+    // Real user-reported state from Toncast UI: YES tickets at Pari yesOdds
+    // 50/52/54/56 live in `Yes[24..27]` (direct indexing), while the
+    // opposing NO orders matchable against YES bets at Pari yesOdds
+    // 58/60/62/64 live in `No[17..20]` (complementary indexing — the raw
+    // index matches NO-probability, not yesOdds).
+    //
+    // Before the fix, `availableTickets(.., true, 58)` wrongly read
+    // `No[yesOddsToIndex(58)] = No[28]`, returning 0 and so a YES limit bet
+    // ignored all the liquidity it should have matched. The NO side was
+    // already correct, masking the bug until a large YES bet was compared
+    // with UI figures.
+    const s: OddsState = {
+      Yes: new Array(ODDS_COUNT).fill(0) as number[],
+      No: new Array(ODDS_COUNT).fill(0) as number[],
+    };
+    s.Yes[24] = 200; // yesOdds=50
+    s.Yes[25] = 104; // yesOdds=52
+    s.Yes[26] = 50; //  yesOdds=54
+    s.Yes[27] = 24; //  yesOdds=56
+    s.No[17] = 200; //  matchable at yesOdds=64 (NO-prob=36)
+    s.No[18] = 100; //  matchable at yesOdds=62 (NO-prob=38)
+    s.No[19] = 50; //   matchable at yesOdds=60 (NO-prob=40)
+    s.No[20] = 20; //   matchable at yesOdds=58 (NO-prob=42)
+
+    it("YES user, worstYesOdds=66, 500 tickets → matches UI screenshot", () => {
+      const r = computeLimitBets({
+        oddsState: s,
+        isYes: true,
+        worstYesOdds: 66,
+        ticketsCount: 500,
+      });
+      expect(r.bets).toEqual([
+        { yesOdds: 58, ticketsCount: 20 },
+        { yesOdds: 60, ticketsCount: 50 },
+        { yesOdds: 62, ticketsCount: 100 },
+        { yesOdds: 64, ticketsCount: 200 },
+        { yesOdds: 66, ticketsCount: 130 },
+      ]);
+      // Matched stake: 20·0.058 + 50·0.060 + 100·0.062 + 200·0.064 = 23.16 TON.
+      // Placement stake: 130·0.066 = 8.58 TON.
+      // 5 batch entries × 0.1 TON execution fee = 0.5 TON.
+      // Total = 32.24 TON.
+      expect(r.totalCost).toBe(32_240_000_000n);
+    });
+
+    it("NO user, worstYesOdds=46, 500 tickets → matches UI screenshot", () => {
+      const r = computeLimitBets({
+        oddsState: s,
+        isYes: false,
+        worstYesOdds: 46,
+        ticketsCount: 500,
+      });
+      expect(r.bets).toEqual([
+        { yesOdds: 46, ticketsCount: 122 },
+        { yesOdds: 50, ticketsCount: 200 },
+        { yesOdds: 52, ticketsCount: 104 },
+        { yesOdds: 54, ticketsCount: 50 },
+        { yesOdds: 56, ticketsCount: 24 },
+      ]);
+      // NO ticketCost = (100 − yesOdds)·0.001 TON:
+      //   24·0.044 + 50·0.046 + 104·0.048 + 200·0.050 = 17.348 matched
+      //   placement 122·0.054 = 6.588
+      //   5 entries × 0.1 fee = 0.5
+      // Total = 25.436 TON.
+      expect(r.totalCost).toBe(25_436_000_000n);
+    });
   });
 });

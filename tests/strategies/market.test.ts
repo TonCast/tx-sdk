@@ -16,12 +16,16 @@ function emptyOddsState(): OddsState {
   };
 }
 
+/**
+ * Seed NO orders matchable against a YES bet at the given Pari yesOdds.
+ * See `availableTickets` JSDoc — `No` is indexed by NO-probability.
+ */
 function stateWithNo(
   entries: Array<{ yesOdds: number; tickets: number }>,
 ): OddsState {
   const s = emptyOddsState();
   for (const e of entries) {
-    s.No[yesOddsToIndex(e.yesOdds)] = e.tickets;
+    s.No[yesOddsToIndex(100 - e.yesOdds)] = e.tickets;
   }
   return s;
 }
@@ -165,7 +169,8 @@ describe("computeMarketBets", () => {
     // avoid adding a direct dep from strategies tests onto ui-helpers.
     const { breakdownTotals } = await import("../../src/ui-helpers.js");
     const s = emptyOddsState();
-    s.No[yesOddsToIndex(56)] = 100;
+    // 100 NO orders matchable at Pari yesOdds=56 → No[yesOddsToIndex(44)].
+    s.No[yesOddsToIndex(100 - 56)] = 100;
     const r = computeMarketBets({
       oddsState: s,
       isYes: true,

@@ -64,9 +64,10 @@ export function computeLimitBets(input: LimitStrategyInput): StrategyResult {
   //             lower bound). Iterating in the wrong direction would
   //             consume the worst coefficients first and leave the best
   //             liquidity unmatched.
-  // The `availableTickets` helper already mirrors the array lookup for NO
-  // (reads `oddsState.Yes`), so the direction change here is purely about
-  // pricing order, not data access.
+  // `availableTickets` handles the counter-side array lookup (direct for NO
+  // user reading `Yes[]`, complementary for YES user reading `No[]` — see
+  // the doc on `availableTickets`), so the direction change here is purely
+  // about pricing order, not data access.
   const step = isYes ? ODDS_STEP : -ODDS_STEP;
   const startOdds = isYes ? ODDS_MIN : ODDS_MAX;
   const inRange = (o: number) =>
