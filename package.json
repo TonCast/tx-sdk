@@ -1,0 +1,83 @@
+{
+  "name": "@toncast/tx-sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK to build TonConnect transactions for placing bets on Toncast Pari contracts (TON-direct or via STON.fi swaps from any jetton).",
+  "license": "MIT",
+  "homepage": "https://github.com/toncast/tx-sdk#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/toncast/tx-sdk.git"
+  },
+  "type": "module",
+  "files": [
+    "dist",
+    "package.json",
+    "README.md",
+    "AGENTS.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./jetton": {
+      "import": {
+        "types": "./dist/jetton/index.d.ts",
+        "default": "./dist/jetton/index.js"
+      },
+      "require": {
+        "types": "./dist/jetton/index.d.cts",
+        "default": "./dist/jetton/index.cjs"
+      }
+    },
+    "./planner": {
+      "import": {
+        "types": "./dist/planner.d.ts",
+        "default": "./dist/planner.js"
+      },
+      "require": {
+        "types": "./dist/planner.d.cts",
+        "default": "./dist/planner.cjs"
+      }
+    }
+  },
+  "scripts": {
+    "format": "npm run format:biome",
+    "format:biome": "biome format --write",
+    "lint": "npm run lint:tsc && npm run lint:biome",
+    "lint:tsc": "tsc --noEmit --pretty",
+    "lint:biome": "biome check",
+    "test": "vitest",
+    "test:coverage": "vitest --run --coverage",
+    "build": "tsup",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run lint && npm run test:coverage && npm run build && npx attw --profile node16 --pack . && npx publint"
+  },
+  "dependencies": {
+    "@ston-fi/api": "^0.32.0",
+    "@ston-fi/sdk": "^2.7.0",
+    "@ton/ton": "^13.9.0 || ^14.0.0 || ^15.0.0 || ^16.0.0"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "0.18.2",
+    "@biomejs/biome": "2.2.6",
+    "@types/node": "^25.6.0",
+    "@vitest/coverage-v8": "^3.2.4",
+    "publint": "0.3.15",
+    "tsup": "8.3.5",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  }
+}

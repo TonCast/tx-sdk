@@ -1,0 +1,66 @@
+import { Address } from "@ton/ton";
+import { TON_DIRECT_GAS } from "../constants.js";
+import { calcBetCost } from "../cost.js";
+import { buildBatchPlaceBetsForWithRefCell } from "../payload.js";
+import type { BetItem, TxParams } from "../types.js";
+import { validateBetParams } from "../validate.js";
+
+export type BuildTonBetTxParams = {
+  /** Address of the target Pari market contract. */
+  pariAddress: string;
+  /** Address that will own the placed bets. */
+  beneficiary: string;
+  /** `true` → YES side, `false` → NO side. */
+  isYes: boolean;
+  /** Final bets array (already merged / validated upstream). */
+  bets: BetItem[];
+  /** Optional referral address. */
+  referral: string | null;
+  /** Referral share, 0..7 (percent). */
+  referralPct: number;
+  /**
+   * TON added to `value` on top of `totalCost`. Defaults to
+   * {@link TON_DIRECT_GAS} (0.05 TON, verified on mainnet).
+   */
+  tonDirectGas?: bigint;
+};
+
+/**
+ * Build a TonConnect-compatible transaction for a TON-direct bet on Pari.
+ *
+ * ```
+ * to    = pariAddress
+ * value = totalCost + tonDirectGas          // TON attached to the message
+ * body  = BatchPlaceBetsForWithRef(...)     // opcode 0xaabbccf0
+ * ```
+ *
+ * No STON.fi swap, no proxy — the Pari contract receives the message
+ * directly. Relies on Pari's internal refund logic when `msgValue` is
+ * insufficient (see `has_refund` assumption in the plan).
+ */
+export function buildTonBetTx(params: BuildTonBetTxParams): TxParams {
+  validateBetParams({
+    pariAddress: params.pariAddress,
+    beneficiary: params.beneficiary,
+    bets: params.bets,
+    referral: params.referral,
+    referralPct: params.referralPct,
+  });
+
+  const { totalCost } = calcBetCost(params.bets, params.isYes);
+  const gas = params.tonDirectGas ?? TON_DIRECT_GAS;
+
+  const body = buildBatchPlaceBetsForWithRefCell({
+    beneficiary: params.beneficiary,
+    isYes: params.isYes,
+    bets: params.bets,
+    referral: params.referral,
+    referralPct: params.referralPct,
+  });
+
+  return {
+    to: Address.parse(params.pariAddress),
+    value: totalCost + gas,
+    body,
+  };
+}

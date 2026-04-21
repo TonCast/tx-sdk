@@ -1,0 +1,35 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.2.6/schema.json",
+  "files": {
+    "ignoreUnknown": true,
+    "includes": [
+      "src/**",
+      "tests/**",
+      "examples/**",
+      "*.ts",
+      "*.json",
+      "!**/dist",
+      "!**/node_modules"
+    ]
+  },
+  "assist": { "actions": { "source": { "organizeImports": "on" } } },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space"
+  },
+  "linter": {
+    "enabled": true
+  },
+  "overrides": [
+    {
+      "includes": ["tests/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noNonNullAssertion": "off"
+          }
+        }
+      }
+    }
+  ]
+}
