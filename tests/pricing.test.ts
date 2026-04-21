@@ -5,7 +5,7 @@ import {
   TON_ADDRESS,
   TON_DIRECT_GAS,
 } from "../src/constants.js";
-import { priceCoins } from "../src/pricing.js";
+import { availableForBet, priceCoins } from "../src/pricing.js";
 import {
   buildSimulation,
   createMockApiClient,
@@ -19,7 +19,7 @@ async function identityCaller<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 describe("priceCoins", () => {
-  it("TON: viable, netTon = amount − walletReserve − TON_DIRECT_GAS", async () => {
+  it("TON: viable, availableForBet = amount − walletReserve − TON_DIRECT_GAS", async () => {
     const apiClient = createMockApiClient();
     const priced = await priceCoins({
       availableCoins: [{ address: TON_ADDRESS, amount: 10_000_000_000n }],
@@ -33,7 +33,9 @@ describe("priceCoins", () => {
     expect(c?.route).toBe("direct");
     expect(c?.gasReserve).toBe(TON_DIRECT_GAS);
     expect(c?.tonEquivalent).toBe(10_000_000_000n);
-    expect(c?.netTon).toBe(10_000_000_000n - 50_000_000n - TON_DIRECT_GAS);
+    expect(availableForBet(c!, 50_000_000n)).toBe(
+      10_000_000_000n - 50_000_000n - TON_DIRECT_GAS,
+    );
   });
 
   it("TON: tiny balance → non-viable with human-readable reason", async () => {
@@ -45,7 +47,7 @@ describe("priceCoins", () => {
       callStonApi: identityCaller,
     });
     expect(priced[0]?.viable).toBe(false);
-    expect(priced[0]?.netTon).toBe(0n);
+    expect(availableForBet(priced[0]!, 50_000_000n)).toBe(0n);
     expect(priced[0]?.reason).toMatch(/no room left/);
   });
 
@@ -61,7 +63,7 @@ describe("priceCoins", () => {
     expect(priced[0]?.reason).toMatch(/tonClient is required/);
   });
 
-  it("jetton with direct route: viable, netTon = tonEquivalent (no gas subtraction)", async () => {
+  it("jetton with direct route: viable, availableForBet = tonEquivalent", async () => {
     const sim = buildSimulation({
       offerAddress: USDT,
       askAddress: TON_ADDRESS,
@@ -92,10 +94,9 @@ describe("priceCoins", () => {
     // askUnits (expected, no slippage) is 50 TON; minAskUnits is 49.5 TON.
     expect(c?.tonEquivalentExpected).toBe(50_000_000_000n);
     expect(c?.gasReserve).toBe(DIRECT_HOP_JETTON_GAS_ESTIMATE);
-    // Post-fix: netTon is NOT gas-subtracted — swap gas is billed to the
-    // TON wallet, not to this jetton. netTon equals tonEquivalent (the
-    // pessimistic floor of the swap output).
-    expect(c?.netTon).toBe(49_500_000_000n);
+    // availableForBet for jetton equals `tonEquivalent` — swap gas is
+    // billed separately from the TON wallet, NOT from the jetton.
+    expect(availableForBet(c!, 50_000_000n)).toBe(49_500_000_000n);
     expect(c?.route).toBe("direct");
     expect(c?.symbol).toBe("USDT");
     expect(c?.decimals).toBe(6);
@@ -145,8 +146,8 @@ describe("priceCoins", () => {
     // leg2.askUnits is 5 TON (expected); minAskUnits is 4.95 (5% slippage).
     expect(c?.tonEquivalentExpected).toBe(5_000_000_000n);
     expect(c?.gasReserve).toBe(CROSS_HOP_JETTON_GAS_ESTIMATE);
-    // Post-fix: netTon = tonEquivalent (no gas subtraction).
-    expect(c?.netTon).toBe(4_950_000_000n);
+    // availableForBet for jetton = tonEquivalent (no gas subtraction).
+    expect(availableForBet(c!, 50_000_000n)).toBe(4_950_000_000n);
     expect(c?.route).toEqual({ intermediate: USDT });
   });
 
@@ -175,7 +176,7 @@ describe("priceCoins", () => {
       callStonApi: identityCaller,
     });
     expect(priced[0]?.viable).toBe(false);
-    expect(priced[0]?.netTon).toBe(0n);
+    expect(availableForBet(priced[0]!, 50_000_000n)).toBe(0n);
     expect(priced[0]?.reason).toMatch(/swap delivers/);
   });
 

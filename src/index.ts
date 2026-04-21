@@ -42,7 +42,11 @@ export {
   planBetOption,
 } from "./planner.js";
 // ─── Pricing ────────────────────────────────────────────────────────────────
-export { type PriceCoinsInput, priceCoins } from "./pricing.js";
+export {
+  availableForBet,
+  type PriceCoinsInput,
+  priceCoins,
+} from "./pricing.js";
 // ─── Rates & cache ──────────────────────────────────────────────────────────
 export {
   type CreateRatesClientOptions,

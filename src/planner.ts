@@ -8,6 +8,7 @@ import {
   TON_ADDRESS,
   TON_DIRECT_GAS,
 } from "./constants.js";
+import { availableForBet } from "./pricing.js";
 import type { RatesClient } from "./rates.js";
 import type { DiscoveredRoute, SwapSimulation } from "./routing/discover.js";
 import type {
@@ -251,16 +252,19 @@ function planJettonOption(args: {
     };
   }
 
-  // Capacity check against the jetton's net TON — if its pessimistic
-  // full-amount delivery can't cover totalCost, fail early without
-  // pretending we could build a quote.
-  if (picked.netTon < input.totalCost) {
+  // Capacity check — if the jetton's pessimistic full-amount delivery
+  // (`tonEquivalent`) can't cover `totalCost`, fail early without
+  // pretending we could build a quote. For jetton sources
+  // `availableForBet` is just `tonEquivalent`; factoring it through the
+  // helper keeps the test symmetric with the TON-direct path.
+  const capacity = availableForBet(picked, input.walletReserve);
+  if (capacity < input.totalCost) {
     return {
       option: {
         feasible: false,
         source,
         reason: "insufficient_balance",
-        shortfall: input.totalCost - picked.netTon,
+        shortfall: input.totalCost - capacity,
       },
       lockedInRate: null,
     };
@@ -286,9 +290,10 @@ function planJettonOption(args: {
   );
 
   if (picked.amount < estimatedOfferUnits) {
-    // Shouldn't happen given the `netTon >= totalCost` guard above, but
-    // the arithmetic might drift by 1 unit due to ceiling rounding —
-    // treat as a balance shortfall rather than build a broken plan.
+    // Shouldn't happen given the `availableForBet >= totalCost` guard
+    // above, but the arithmetic might drift by 1 unit due to ceiling
+    // rounding — treat as a balance shortfall rather than build a
+    // broken plan.
     return {
       option: {
         feasible: false,

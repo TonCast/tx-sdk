@@ -13,7 +13,13 @@
  *    authorise the transfer and the swap would fail.
  */
 // WARNING: uses mainnet endpoints — test with minimal funds first.
-import { TON_ADDRESS, TonClient, ToncastTxSdk } from "@toncast/tx-sdk";
+import {
+  availableForBet,
+  DEFAULT_WALLET_RESERVE,
+  TON_ADDRESS,
+  TonClient,
+  ToncastTxSdk,
+} from "@toncast/tx-sdk";
 
 const PARI_ADDRESS = "EQA7bkHU1hRX6LtvkuAASvN0YSX0tk-N9gx5Ji3oDioslLP0";
 
@@ -42,8 +48,9 @@ const priced = await txSDK.priceCoins({
 console.log("Agent's viable sources:");
 for (const c of priced) {
   if (c.viable) {
+    const capacity = availableForBet(c, DEFAULT_WALLET_RESERVE);
     console.log(
-      `  ${c.symbol ?? c.address.slice(0, 10)} → netTon=${Number(c.netTon) / 1e9} TON`,
+      `  ${c.symbol ?? c.address.slice(0, 10)} → ${Number(capacity) / 1e9} TON to bet`,
     );
   }
 }

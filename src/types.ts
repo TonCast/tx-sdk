@@ -82,7 +82,7 @@ export type PricedCoin = {
    * guaranteed floor that the DEX refuses to deliver below. For TON
    * itself: equals `amount`.
    *
-   * Use this for feasibility checks — planner's `netTon ≥ totalCost`
+   * Use this for feasibility checks — planner's `availableForBet ≥ totalCost`
    * guard relies on the floor so the bet can't fail for want of TON.
    */
   tonEquivalent: bigint;
@@ -106,24 +106,11 @@ export type PricedCoin = {
    * **This is paid from the user's TON wallet, not from the jetton.**
    * The planner checks it separately via `tonOnWallet ≥ gasReserve +
    * walletReserve` and fails with `insufficient_ton_for_gas` when short.
-   * `netTon` does NOT deduct this for jettons — a jetton's capacity to
-   * fund the bet is its own swap output, orthogonal to wallet gas.
+   * `availableForBet` does NOT deduct this for jettons — a jetton's
+   * capacity to fund the bet is its own swap output, orthogonal to
+   * wallet gas.
    */
   gasReserve: bigint;
-  /**
-   * Guaranteed TON this coin contributes to the bet.
-   *
-   * - For TON: `amount − walletReserve − TON_DIRECT_GAS` (the bet and its
-   *   Pari gas are both billed to the same TON balance, so we net both
-   *   out).
-   * - For jettons: equals {@link tonEquivalent} (no gas subtraction —
-   *   swap gas is paid from TON wallet, not from this jetton).
-   *
-   * `0n` when `!viable`. UIs that want to show an optimistic preview
-   * should use `tonEquivalentExpected` instead for jettons (this field
-   * is the safety-critical pessimistic one).
-   */
-  netTon: bigint;
   /** Discovered route to TON. `null` for TON itself or when discovery failed. */
   route: "direct" | { intermediate: string } | null;
   /**

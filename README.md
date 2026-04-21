@@ -129,7 +129,7 @@ const priced = await txSDK.priceCoins({
     { address: USDT, amount: 100_000_000n, symbol: "USDT", decimals: 6 },
   ],
 });
-// priced[i] = { address, tonEquivalent, gasReserve, netTon, route, viable, ... }
+// priced[i] = { address, tonEquivalent, tonEquivalentExpected, gasReserve, route, viable, ... }
 
 // 2. Pick a source (user's choice from UI). TON-first if viable is sensible.
 const picked =
@@ -313,7 +313,6 @@ type PricedCoin = {
   tonEquivalent: bigint;          // pessimistic = minAskUnits = askUnits × (1 − slippage)
   tonEquivalentExpected: bigint;  // expected = askUnits (stable-market projection)
   gasReserve: bigint;             // TON needed on the wallet for the swap (0.05/0.3/0.6)
-  netTon: bigint;                 // TON this coin contributes to the bet (= tonEquivalent for jetton)
   route: "direct" | { intermediate: string } | null;
   viable: boolean;                // tonEquivalent > gasReserve
   reason?: string;                // explanation when !viable
@@ -322,21 +321,39 @@ type PricedCoin = {
 
 The rules:
 
-| Coin                      | Viable iff                                      | `gasReserve`  | `netTon` formula |
-| ------------------------- | ----------------------------------------------- | ------------- | ---------------- |
-| TON                       | `amount > walletReserve + TON_DIRECT_GAS`       | `0.05 TON`    | `amount − walletReserve − TON_DIRECT_GAS` |
-| Jetton (direct route)     | `tonEquivalent > DIRECT_HOP_JETTON_GAS_ESTIMATE` | `0.3 TON`    | `tonEquivalent` (no gas deduction) |
-| Jetton (2-hop route)      | `tonEquivalent > CROSS_HOP_JETTON_GAS_ESTIMATE`  | `0.6 TON`    | `tonEquivalent` (no gas deduction) |
-| Jetton (no route)         | never                                           | `0n`          | `0n` |
+| Coin                      | Viable iff                                      | `gasReserve`  |
+| ------------------------- | ----------------------------------------------- | ------------- |
+| TON                       | `amount > walletReserve + TON_DIRECT_GAS`       | `0.05 TON`    |
+| Jetton (direct route)     | `tonEquivalent > DIRECT_HOP_JETTON_GAS_ESTIMATE` | `0.3 TON`    |
+| Jetton (2-hop route)      | `tonEquivalent > CROSS_HOP_JETTON_GAS_ESTIMATE`  | `0.6 TON`    |
+| Jetton (no route)         | never                                           | `0n`          |
 
-**Note on `netTon` for jettons.** Swap gas (`gasReserve`) is paid from the user's **TON wallet**, not from the jetton itself. The planner checks TON-wallet gas availability separately (`insufficient_ton_for_gas`), so the jetton's contribution to the bet is simply what the swap delivers — no deduction. Earlier versions incorrectly subtracted `gasReserve` from `netTon`, shrinking the displayed capacity by ~20-60% of the true value.
+### How much can this coin fund? `availableForBet(coin, walletReserve)`
 
-**`tonEquivalent` vs `tonEquivalentExpected`.** Both refer to the gross TON output of the full-amount swap — the difference is what slippage assumption they use.
+Import the helper and use it for both UI aggregates and SDK-internal feasibility checks:
 
-- **`tonEquivalent`** = `minAskUnits` = slippage-adjusted floor. The DEX will refuse to deliver less. Safe for `netTon`-based capacity checks.
+```ts
+import { availableForBet, DEFAULT_WALLET_RESERVE } from "@toncast/tx-sdk";
+
+const capacity = availableForBet(coin, DEFAULT_WALLET_RESERVE);
+//   TON:    amount − walletReserve − TON_DIRECT_GAS       (0 if negative)
+//   Jetton: tonEquivalent if viable, else 0 (no gas subtraction!)
+
+const totalCapacity = priced
+  .filter((c) => c.viable)
+  .reduce((s, c) => s + availableForBet(c, DEFAULT_WALLET_RESERVE), 0n);
+```
+
+Why no gas subtraction for jettons: swap gas (`gasReserve`, 0.3/0.6 TON) is paid from the user's **TON wallet**, not from the jetton itself. The planner checks TON-wallet gas availability separately (`insufficient_ton_for_gas`), so the jetton's contribution to the bet is exactly what the swap delivers.
+
+### `tonEquivalent` vs `tonEquivalentExpected`
+
+Both refer to the gross TON output of the full-amount swap — the difference is what slippage assumption they use.
+
+- **`tonEquivalent`** = `minAskUnits` = slippage-adjusted floor. The DEX will refuse to deliver less. Used by `availableForBet` and by the planner's capacity check.
 - **`tonEquivalentExpected`** = `askUnits` = expected delivery under stable pool conditions. ~5% higher at the default 5% slippage. Best for UI "you'll get ~X TON" labels.
 
-Use `tonEquivalentExpected` in user-facing labels so the displayed swap output matches the realistic delivery. Use `tonEquivalent` / `netTon` for safety-critical path (feasibility checks, capacity planning) — they represent the guaranteed floor.
+Use `tonEquivalentExpected` in user-facing labels so the displayed swap output matches the realistic delivery. Use `availableForBet` / `tonEquivalent` for the safety-critical path — they represent the guaranteed floor.
 
 No bet parameters are required for `priceCoins`. Viability is a pure property of "is swapping this coin net-positive in TON?" — independent of bet sizing.
 
@@ -663,7 +680,7 @@ The coin you picked as `source` was flagged `viable: false` in `pricedCoins`. Th
 
 ### Quote returns `feasible: false, reason: "insufficient_balance"`
 
-The source's `netTon` (after slippage-adjusted swap math) is below `totalCost`. `BetOption.shortfall` tells you in nano-TON how much more TON-equivalent the user would need to top up the selected coin with. No single other coin? The user must pre-consolidate in their wallet and try again — the SDK does not do multi-source funding.
+The source's `availableForBet(coin, walletReserve)` (after slippage-adjusted swap math) is below `totalCost`. `BetOption.shortfall` tells you in nano-TON how much more TON-equivalent the user would need to top up the selected coin with. No single other coin? The user must pre-consolidate in their wallet and try again — the SDK does not do multi-source funding.
 
 ### Quote returns `feasible: false, reason: "slippage_exceeds_limit"`
 

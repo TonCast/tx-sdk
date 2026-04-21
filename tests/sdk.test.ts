@@ -31,7 +31,6 @@ function tonPriced(amount: bigint): PricedCoin {
     tonEquivalent: amount,
     tonEquivalentExpected: amount,
     gasReserve: 50_000_000n,
-    netTon: amount > 100_000_000n ? amount - 100_000_000n : 0n,
     route: "direct",
     viable: amount > 100_000_000n,
   };
@@ -289,8 +288,6 @@ function priceUsdtDirect(tonEq: bigint): PricedCoin {
     tonEquivalent: tonEq,
     tonEquivalentExpected: (tonEq * 100n) / 95n,
     gasReserve: DIRECT_HOP_JETTON_GAS_ESTIMATE,
-    // Post-fix: no gas deduction from netTon for jettons.
-    netTon: tonEq > DIRECT_HOP_JETTON_GAS_ESTIMATE ? tonEq : 0n,
     route: "direct",
     viable: tonEq > DIRECT_HOP_JETTON_GAS_ESTIMATE,
     symbol: "USDT",

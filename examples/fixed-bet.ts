@@ -11,7 +11,13 @@
  *      and builds the actual transaction.
  */
 // WARNING: uses mainnet endpoints — test with minimal funds first.
-import { TON_ADDRESS, TonClient, ToncastTxSdk } from "@toncast/tx-sdk";
+import {
+  availableForBet,
+  DEFAULT_WALLET_RESERVE,
+  TON_ADDRESS,
+  TonClient,
+  ToncastTxSdk,
+} from "@toncast/tx-sdk";
 
 const PARI_ADDRESS = "EQA7bkHU1hRX6LtvkuAASvN0YSX0tk-N9gx5Ji3oDioslLP0";
 const BENEFICIARY = "UQDr92G-zeVDGAi-1xzsOVDAdy9jwoHwxNYPG7AGnuiNfkR8";
@@ -33,9 +39,10 @@ const priced = await txSDK.priceCoins({
 
 console.log("Priced coins:");
 for (const c of priced) {
+  const capacity = availableForBet(c, DEFAULT_WALLET_RESERVE);
   console.log(
     `  ${c.symbol ?? c.address.slice(0, 6)}: ` +
-      `viable=${c.viable}, netTon=${c.netTon}, gasReserve=${c.gasReserve}`,
+      `viable=${c.viable}, availableForBet=${capacity}, gasReserve=${c.gasReserve}`,
   );
 }
 

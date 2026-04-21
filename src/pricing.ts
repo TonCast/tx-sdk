@@ -14,6 +14,42 @@ import type { PairsCache } from "./routing/pairsCache.js";
 import type { AvailableCoin, PricedCoin } from "./types.js";
 import { sameAddress } from "./utils/address.js";
 
+/**
+ * Guaranteed TON this priced coin can contribute to a bet.
+ *
+ * Handles the TON/jetton asymmetry in one place:
+ *
+ * - **TON**: subtracts `walletReserve` + `gasReserve` (`TON_DIRECT_GAS`,
+ *   0.05 TON) because both the bet's `totalCost` and the Pari-side gas
+ *   are billed to the same wallet balance.
+ * - **Jetton**: equals `tonEquivalent` (the pessimistic `minAskUnits` of
+ *   the full swap). Swap gas is billed to the user's TON wallet
+ *   separately, NOT to this jetton, so it must NOT be deducted here.
+ *
+ * Returns `0n` when `!viable`, a non-viable coin has nothing to offer.
+ *
+ * Use this as the unified capacity check:
+ *
+ * ```ts
+ * if (availableForBet(picked, walletReserve) < totalCost) ...
+ * ```
+ *
+ * UI layers that want an optimistic "you will get ~X TON" label should
+ * use `coin.tonEquivalentExpected` (not this function) — that one is
+ * the slippage-unadjusted projection and typically ~5% higher.
+ */
+export function availableForBet(
+  coin: PricedCoin,
+  walletReserve: bigint,
+): bigint {
+  if (!coin.viable) return 0n;
+  if (sameAddress(coin.address, TON_ADDRESS)) {
+    const required = walletReserve + coin.gasReserve;
+    return coin.amount > required ? coin.amount - required : 0n;
+  }
+  return coin.tonEquivalent;
+}
+
 type NetworkCaller = <T>(fn: () => Promise<T>, method: string) => Promise<T>;
 
 export type PriceCoinsInput = {
@@ -27,8 +63,8 @@ export type PriceCoinsInput = {
   slippage?: string;
   /**
    * TON reserved on the wallet after all transactions finish. Subtracted
-   * from TON's usable amount so `netTon` matches what the bet can actually
-   * spend. Default {@link DEFAULT_WALLET_RESERVE}.
+   * from TON's usable amount so {@link availableForBet} matches what the
+   * bet can actually spend. Default {@link DEFAULT_WALLET_RESERVE}.
    */
   walletReserve?: bigint;
   /** STON.fi API client for swap simulation + route discovery. */
@@ -64,7 +100,7 @@ const defaultCaller: NetworkCaller = async (fn) => fn();
  * No throws: failures surface per-coin as `viable: false`. The function
  * deliberately takes **no** bet parameters — viability is a pure property
  * of "is swap cheaper than what it delivers?", independent of bet sizing.
- * UI layers should sum `netTon` across user-selected viable coins.
+ * UI layers should sum {@link availableForBet} across user-selected viable coins.
  */
 export async function priceCoins(
   input: PriceCoinsInput,
@@ -114,7 +150,7 @@ async function priceOne(args: {
   if (sameAddress(coin.address, TON_ADDRESS)) {
     const gasReserve = TON_DIRECT_GAS;
     const required = walletReserve + gasReserve;
-    const netTon = coin.amount > required ? coin.amount - required : 0n;
+    const usable = coin.amount > required ? coin.amount - required : 0n;
     return {
       ...meta,
       // For TON, no swap is involved — min and expected collapse to the
@@ -122,10 +158,9 @@ async function priceOne(args: {
       tonEquivalent: coin.amount,
       tonEquivalentExpected: coin.amount,
       gasReserve,
-      netTon,
       route: "direct",
-      viable: netTon > 0n,
-      ...(netTon === 0n
+      viable: usable > 0n,
+      ...(usable === 0n
         ? {
             reason: `TON balance ${coin.amount} ≤ walletReserve + gas (${required}) — no room left to bet.`,
           }
@@ -139,7 +174,6 @@ async function priceOne(args: {
       tonEquivalent: 0n,
       tonEquivalentExpected: 0n,
       gasReserve: 0n,
-      netTon: 0n,
       route: null,
       viable: false,
       reason:
@@ -176,17 +210,11 @@ async function priceOne(args: {
     // accounting deduction.
     const viable = tonEquivalent > gasReserve;
 
-    // `netTon` is the jetton's gross contribution to the bet, equal to
-    // the pessimistic swap output. Gas is NOT deducted here because it
-    // is a separate wallet-TON charge (see `gasReserve` docstring).
-    const netTon = viable ? tonEquivalent : 0n;
-
     return {
       ...meta,
       tonEquivalent,
       tonEquivalentExpected,
       gasReserve,
-      netTon,
       route:
         route.type === "direct"
           ? "direct"
@@ -204,7 +232,6 @@ async function priceOne(args: {
       tonEquivalent: 0n,
       tonEquivalentExpected: 0n,
       gasReserve: 0n,
-      netTon: 0n,
       route: null,
       viable: false,
       reason:

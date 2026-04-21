@@ -74,7 +74,6 @@ function priceTon(amount: bigint): PricedCoin {
     tonEquivalent: amount,
     tonEquivalentExpected: amount,
     gasReserve: 50_000_000n,
-    netTon: amount - 50_000_000n - 50_000_000n,
     route: "direct",
     viable: amount > 100_000_000n,
   };
@@ -93,8 +92,6 @@ function priceJettonDirect(
     // Expected = minAskUnits / (1 − slippage); approximate as tonEq / 0.95.
     tonEquivalentExpected: (tonEq * 100n) / 95n,
     gasReserve: DIRECT_HOP_JETTON_GAS_ESTIMATE,
-    // Post-fix: netTon = tonEquivalent (swap gas is billed to TON wallet).
-    netTon: tonEq > DIRECT_HOP_JETTON_GAS_ESTIMATE ? tonEq : 0n,
     route: "direct",
     viable: tonEq > DIRECT_HOP_JETTON_GAS_ESTIMATE,
     symbol: "USDT",
@@ -194,7 +191,6 @@ describe("planBetOption", () => {
       tonEquivalent: 1000n,
       tonEquivalentExpected: 1053n,
       gasReserve: DIRECT_HOP_JETTON_GAS_ESTIMATE,
-      netTon: 0n,
       route: "direct",
       viable: false,
       reason: "swap gas exceeds delivered TON",
@@ -286,7 +282,7 @@ describe("planBetOption", () => {
     }
   });
 
-  it("jetton source: netTon < totalCost → insufficient_balance (early exit)", async () => {
+  it("jetton source: capacity < totalCost → insufficient_balance (early exit)", async () => {
     // Jetton delivers 1 TON, bet needs 5.7 — must fail without calling reverse-sim.
     const pricedCoins = [
       priceTon(2_000_000_000n),
@@ -391,8 +387,6 @@ describe("planBetOption", () => {
         tonEquivalent: 8_000_000_000n,
         tonEquivalentExpected: 8_421_052_631n, // 8e9 / 0.95 ≈ 8.42e9
         gasReserve: CROSS_HOP_JETTON_GAS_ESTIMATE,
-        // Post-fix: no gas deduction from netTon for jettons.
-        netTon: 8_000_000_000n,
         route: { intermediate: USDT },
         viable: true,
       },
