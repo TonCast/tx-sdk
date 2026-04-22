@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { TON_ADDRESS } from "../src/constants.js";
+import { ToncastBetError } from "../src/errors.js";
 import { ToncastTxSdk } from "../src/sdk.js";
 import { subscribeFixedBet } from "../src/subscribe.js";
 import type { PricedCoin } from "../src/types.js";
@@ -148,7 +149,10 @@ describe("subscribeFixedBet", () => {
     expect(listenerCount).toBe(0);
   });
 
-  it("onError receives errors and doesn't break the loop", async () => {
+  it("permanent ToncastBetError stops the loop after a single onError call", async () => {
+    // Regression: the loop used to retry `ToncastBetError` on every
+    // interval, flooding callers with the same deterministic error.
+    // Validation errors are now terminal — one onError call, then exit.
     const sdk = makeSdk();
     const errs: unknown[] = [];
     const onData = vi.fn();
@@ -168,15 +172,105 @@ describe("subscribeFixedBet", () => {
       },
       onData,
       {
-        intervalMs: 10_000,
+        intervalMs: 10,
         onError: (e) => errs.push(e),
       },
     );
 
-    await new Promise((r) => setTimeout(r, 50));
-    sub.stop();
+    // Wait well past several intervals; loop must NOT emit more than
+    // one error because the permanent error short-circuits it.
     await sub.done;
 
-    expect(errs.length + onData.mock.calls.length).toBeGreaterThan(0);
+    expect(errs.length).toBe(1);
+    expect(errs[0]).toBeInstanceOf(ToncastBetError);
+    expect(onData).not.toHaveBeenCalled();
+  });
+
+  it("transient errors back off exponentially (intervalMs → 2× → 4×)", async () => {
+    // Seed an SDK whose quote method always rejects with a generic
+    // Error (not ToncastBetError), simulating a network failure.
+    // Verify that successive failures widen the gap between onError
+    // calls roughly following the 2^(n-1) * intervalMs schedule.
+    const sdk = makeSdk();
+    const spy = vi.spyOn(sdk, "quoteFixedBet").mockImplementation(async () => {
+      throw new Error("transient upstream failure");
+    });
+
+    const timestamps: number[] = [];
+    const sub = subscribeFixedBet(
+      sdk,
+      {
+        pariAddress: PARI,
+        beneficiary: BENEFICIARY,
+        isYes: true,
+        yesOdds: 56,
+        ticketsCount: 1,
+        referral: null,
+        referralPct: 0,
+        source: TON_ADDRESS,
+        pricedCoins: [tonPriced(10_000_000_000n)],
+      },
+      vi.fn(),
+      {
+        intervalMs: 20,
+        onError: () => timestamps.push(Date.now()),
+      },
+    );
+
+    // Wait long enough to see 4 errors: base + 20 + 40 + 80 ≈ 140ms.
+    await new Promise((r) => setTimeout(r, 300));
+    sub.stop();
+    await sub.done;
+    spy.mockRestore();
+
+    // We should see at least three errors (first + two backoffs).
+    expect(timestamps.length).toBeGreaterThanOrEqual(3);
+    // Second-to-third gap must be strictly larger than first-to-second
+    // (2× vs 1× intervalMs minimum).
+    if (timestamps.length >= 3) {
+      const gap1 = timestamps[1]! - timestamps[0]!;
+      const gap2 = timestamps[2]! - timestamps[1]!;
+      expect(gap2).toBeGreaterThan(gap1);
+    }
+  });
+
+  it("transient failure → recovery resets the backoff", async () => {
+    const sdk = makeSdk();
+    // Capture the real implementation BEFORE spying so the recovery
+    // branch can delegate to it instead of re-entering the spy.
+    const realQuote = sdk.quoteFixedBet.bind(sdk);
+    let calls = 0;
+    const spy = vi
+      .spyOn(sdk, "quoteFixedBet")
+      .mockImplementation(async (params) => {
+        calls++;
+        if (calls <= 2) throw new Error("transient");
+        return realQuote(params);
+      });
+
+    const onData = vi.fn();
+    const sub = subscribeFixedBet(
+      sdk,
+      {
+        pariAddress: PARI,
+        beneficiary: BENEFICIARY,
+        isYes: true,
+        yesOdds: 56,
+        ticketsCount: 1,
+        referral: null,
+        referralPct: 0,
+        source: TON_ADDRESS,
+        pricedCoins: [tonPriced(10_000_000_000n)],
+      },
+      onData,
+      { intervalMs: 10, onError: () => {} },
+    );
+
+    await new Promise((r) => setTimeout(r, 300));
+    sub.stop();
+    await sub.done;
+    spy.mockRestore();
+
+    expect(onData).toHaveBeenCalled();
   });
 });

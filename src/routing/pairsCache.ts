@@ -1,6 +1,6 @@
 import type { StonApiClient } from "@ston-fi/api";
 import { PAIRS_CACHE_TTL_MS, TON_ADDRESS } from "../constants.js";
-import { normalizeAddress, sameAddress } from "../utils/address.js";
+import { normalizeAddress } from "../utils/address.js";
 
 type NetworkCaller = <T>(fn: () => Promise<T>, method: string) => Promise<T>;
 
@@ -111,17 +111,29 @@ export class PairsCache {
 function buildSnapshot(pairs: Array<[string, string]>): PairsSnapshot {
   const byOffer = new Map<string, Set<string>>();
   const tonAsks = new Set<string>();
-  for (const p of pairs) {
-    if (!p[0] || !p[1]) continue;
-    const offer = normalizeAddress(p[0]);
-    const ask = normalizeAddress(p[1]);
-    let set = byOffer.get(offer);
+  const tonNorm = normalizeAddress(TON_ADDRESS);
+  // Record pairs in BOTH directions. STON.fi's `/v1/markets` has
+  // historically returned each pool as a single tuple, but the shape
+  // is not contractually documented. Treating the list as undirected
+  // lets `hasDirectPoolWithTon` / `getCrossHopCandidates` work
+  // whichever way the ordering flips — a stale assumption would
+  // otherwise silently hide valid direct pools and cross-hop
+  // intermediates behind false-negative lookups.
+  const addEdge = (a: string, b: string) => {
+    let set = byOffer.get(a);
     if (!set) {
       set = new Set();
-      byOffer.set(offer, set);
+      byOffer.set(a, set);
     }
-    set.add(ask);
-    if (sameAddress(ask, TON_ADDRESS)) tonAsks.add(offer);
+    set.add(b);
+    if (b === tonNorm) tonAsks.add(a);
+  };
+  for (const p of pairs) {
+    if (!p[0] || !p[1]) continue;
+    const a = normalizeAddress(p[0]);
+    const b = normalizeAddress(p[1]);
+    addEdge(a, b);
+    addEdge(b, a);
   }
   return { pairs, byOffer, tonAsks, fetchedAt: Date.now() };
 }

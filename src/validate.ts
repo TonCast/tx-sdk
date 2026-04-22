@@ -4,6 +4,7 @@ import {
   ODDS_MAX,
   ODDS_MIN,
   ODDS_STEP,
+  PARI_EXECUTION_FEE,
 } from "./constants.js";
 import { ToncastBetError } from "./errors.js";
 import type { BetItem } from "./types.js";
@@ -163,7 +164,7 @@ export function validateBetParams(params: {
     if (seenOdds.has(b.yesOdds)) {
       throw new ToncastBetError(
         "DUPLICATE_YES_ODDS",
-        `bets[${i}].yesOdds=${b.yesOdds} appears more than once — call mergeSameOdds(bets) to fold duplicates and save ${100_000_000} nano-TON per extra entry.`,
+        `bets[${i}].yesOdds=${b.yesOdds} appears more than once — call mergeSameOdds(bets) to fold duplicates and save ${PARI_EXECUTION_FEE} nano-TON per extra entry.`,
       );
     }
     seenOdds.add(b.yesOdds);

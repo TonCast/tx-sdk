@@ -449,6 +449,45 @@ Every successful quote emits **exactly one transaction** funded by **one source*
 
 If no single viable source covers the bet, the quote is returned `feasible: false` with `reason: "insufficient_balance"` and a `shortfall` in nano-TON. The user must top up the chosen coin (or pre-swap to TON in another wallet) and quote again.
 
+## Preview mode (`allowInsufficientBalance`)
+
+By default `quoteXxxBet` returns `feasible: false` as soon as the balance falls short — even the ones the TonConnect wallet would catch on its own. That's safe but inconvenient: a slider-driven UI can't build the transaction for a user who just hasn't topped up yet, and `confirmQuote` throws `QUOTE_INFEASIBLE`.
+
+Pass `allowInsufficientBalance: true` in any `quoteXxxBet` call to switch to preview mode:
+
+```ts
+const quote = await sdk.quoteFixedBet({
+  // ...standard params...
+  source: TON_ADDRESS,
+  pricedCoins,
+  allowInsufficientBalance: true,
+});
+
+if (quote.option.feasible) {
+  // `txs[]` is built, `warnings` and `shortfall` explain the gap.
+  if (quote.option.shortfall && quote.option.shortfall > 0n) {
+    ui.showTopUpBanner(quote.option.shortfall);
+    ui.disablePlaceBetButton();
+  } else {
+    ui.enablePlaceBetButton();
+  }
+}
+```
+
+The flag relaxes only the shortfalls that the wallet will still intercept **before** broadcasting the transaction (so no gas is burned):
+
+| Case | Default | With flag |
+|---|---|---|
+| TON source, balance < totalCost + gas + walletReserve | `feasible: false` (`insufficient_balance`) | `feasible: true`, `warnings: ["insufficient_balance …"]`, `shortfall` set, tx built. Wallet refuses to sign. |
+| Jetton source, wallet TON < swap gas reservation | `feasible: false` (`insufficient_ton_for_gas`) | `feasible: true` (`estimated`), `warnings: ["insufficient_ton_for_gas …"]`, `shortfall` set. `confirmQuote` finalises the tx; wallet refuses to sign because tx `value` exceeds the TON balance. |
+| **Jetton source, jetton balance below `totalCost`** | `feasible: false` (`insufficient_balance`) | **Still `feasible: false`.** The wallet cannot see missing jetton balance, so signing would succeed and the jetton wallet would bounce the transfer on-chain, **burning gas**. The flag deliberately keeps this blocked. |
+
+UI using the flag should:
+
+1. Always read `quote.totalCost`, `calcWinnings(bets, referralPct)`, etc. to render cost / payout info regardless of feasibility.
+2. Enable the "Place Bet" button only when `option.feasible === true` **and** `option.shortfall === undefined` (no residual balance gap).
+3. Show the `shortfall` as a "Top up X TON" banner otherwise.
+
 ## Subscriptions
 
 For live-updating UIs (Market / Limit sliders where the user drags amounts and the quote needs to refresh every few seconds), use the `subscribeXxxBet` helpers. They wrap `quoteXxxBet` in a polling loop with abort support:

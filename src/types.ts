@@ -198,6 +198,27 @@ export type CommonBetParams = {
    * to {@link DEFAULT_WALLET_RESERVE}.
    */
   walletReserve?: bigint;
+  /**
+   * "Preview mode". When `true`, the planner stops bailing out with
+   * `feasible: false` for balance-based shortfalls that the wallet
+   * would catch *before* on-chain broadcast — the TonConnect wallet
+   * already compares `value` to the user's TON balance and refuses to
+   * sign if short, so no gas is burned. The resulting quote carries
+   * `warnings: ["insufficient_balance", ...]` and `shortfall`.
+   *
+   * Specifically, the flag RELAXES:
+   * - TON source: `balance < totalCost + gas + walletReserve`;
+   * - Jetton source: `tonOnWallet < jetton-swap gasReserve + walletReserve`
+   *   (wallet still sees the missing TON in `value` and refuses).
+   *
+   * It does NOT relax `insufficient_balance` on a jetton source —
+   * missing *jetton* balance is invisible to the signing wallet, and
+   * the on-chain jetton wallet would bounce the transfer and **burn
+   * gas**. Planner keeps that case `feasible: false`.
+   *
+   * Default `false` — preserves the historical strict contract.
+   */
+  allowInsufficientBalance?: boolean;
 };
 
 /** Parameters for {@link ToncastTxSdk.quoteFixedBet}. */
@@ -332,6 +353,15 @@ export type BetOption =
       /** Route used — omitted for TON-funded bets. */
       route?: "direct" | { intermediate: string };
       warnings?: string[];
+      /**
+       * Present only when `allowInsufficientBalance: true` let a
+       * balance-short quote through. Nano-TON amount the user is short
+       * by; UI can render the missing top-up next to the disabled
+       * "Place Bet" button. The wallet still refuses to sign because
+       * the tx's `value` exceeds the TON balance, so nothing reaches
+       * the network.
+       */
+      shortfall?: bigint;
     }
   | {
       feasible: false;

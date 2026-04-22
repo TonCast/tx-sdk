@@ -428,6 +428,120 @@ describe("planBetOption", () => {
   // during the fresh reverse-sim performed immediately before signing.
   // The planner no longer talks to STON.fi for jetton sources at all.
 
+  it("TON source + allowInsufficientBalance: feasible preview with warnings + shortfall", async () => {
+    // Preview mode: let the quote through even though balance is far
+    // below tonNeeded. TonConnect wallet compares `value` to balance
+    // before signing and refuses — no gas is burned. UI can render
+    // cost info + disabled button with shortfall.
+    const apiClient = createMockApiClient();
+    const rates = makeRates();
+    const pricedCoins = [priceTon(1_000_000_000n)]; // 1 TON vs 5.7 TON bet
+
+    const { option, lockedInRate } = await planBetOption({
+      bets,
+      totalCost,
+      pariAddress: PARI,
+      beneficiary: BENEFICIARY,
+      isYes: true,
+      referral: null,
+      referralPct: 0,
+      source: TON_ADDRESS,
+      pricedCoins,
+      walletReserve: 50_000_000n,
+      allowInsufficientBalance: true,
+      rates: rates as unknown as RatesClient,
+      apiClient,
+      callStonApi: identityCaller,
+      callTonClient: identityCaller,
+    });
+
+    expect(option.feasible).toBe(true);
+    if (option.feasible) {
+      // Tx is still built at full value — wallet will refuse to sign.
+      expect(option.txs).toHaveLength(1);
+      expect(option.estimated).toBe(false);
+      expect(option.shortfall).toBeGreaterThan(0n);
+      expect(option.warnings?.[0]).toContain("insufficient_balance");
+    }
+    // TON source never carries a locked-in rate (no swap).
+    expect(lockedInRate).toBeNull();
+  });
+
+  it("jetton source + allowInsufficientBalance (gas short): feasible preview with shortfall", async () => {
+    // 0.2 TON on wallet but direct-hop needs 0.3 + walletReserve. With
+    // the flag, planner returns a feasible ESTIMATED quote carrying
+    // the shortfall — confirmQuote will build the real tx whose
+    // `value` exceeds the TON balance, and the wallet refuses to sign.
+    const pricedCoins = [
+      priceTon(200_000_000n),
+      priceJettonDirect(USDT, 100_000_000n, 50_000_000_000n),
+    ];
+
+    const { option, lockedInRate } = await planBetOption({
+      bets,
+      totalCost,
+      pariAddress: PARI,
+      beneficiary: BENEFICIARY,
+      isYes: true,
+      referral: null,
+      referralPct: 0,
+      source: USDT,
+      pricedCoins,
+      walletReserve: 50_000_000n,
+      allowInsufficientBalance: true,
+      rates: makeRates() as unknown as RatesClient,
+      apiClient: createMockApiClient(),
+      tonClient: makeFakeTonClient(),
+      callStonApi: identityCaller,
+      callTonClient: identityCaller,
+    });
+
+    expect(option.feasible).toBe(true);
+    if (option.feasible) {
+      expect(option.estimated).toBe(true);
+      expect(option.txs).toEqual([]);
+      expect(option.shortfall).toBeGreaterThan(0n);
+      expect(option.warnings?.[0]).toContain("insufficient_ton_for_gas");
+    }
+    // Locked rate is still produced so confirmQuote can finalise.
+    expect(lockedInRate).not.toBeNull();
+  });
+
+  it("jetton source + allowInsufficientBalance does NOT relax insufficient JETTON balance", async () => {
+    // Jetton delivers 1 TON, bet needs 5.7 TON. Missing jetton balance
+    // is invisible to the wallet — relaxing this case would let the
+    // swap reach the network and burn gas on bounce. Planner MUST
+    // keep feasibility blocked even with the flag.
+    const pricedCoins = [
+      priceTon(2_000_000_000n),
+      priceJettonDirect(USDT, 1_000_000n, 1_000_000_000n),
+    ];
+
+    const { option } = await planBetOption({
+      bets,
+      totalCost,
+      pariAddress: PARI,
+      beneficiary: BENEFICIARY,
+      isYes: true,
+      referral: null,
+      referralPct: 0,
+      source: USDT,
+      pricedCoins,
+      walletReserve: 50_000_000n,
+      allowInsufficientBalance: true,
+      rates: makeRates() as unknown as RatesClient,
+      apiClient: createMockApiClient(),
+      tonClient: makeFakeTonClient(),
+      callStonApi: identityCaller,
+      callTonClient: identityCaller,
+    });
+
+    expect(option.feasible).toBe(false);
+    if (!option.feasible) {
+      expect(option.reason).toBe("insufficient_balance");
+    }
+  });
+
   it("source matches pricedCoins entry across address formats (EQ vs UQ)", async () => {
     // Regression: planner used strict string equality to look up `source`
     // inside `pricedCoins`. If the caller priced with one textual form

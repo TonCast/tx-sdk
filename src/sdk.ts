@@ -11,7 +11,6 @@ import {
   DEFAULT_WALLET_RESERVE,
   DEX_CUSTOM_PAYLOAD_FORWARD_GAS,
   PAIRS_CACHE_TTL_MS,
-  TON_ADDRESS,
   TON_DIRECT_GAS,
 } from "./constants.js";
 import { ToncastBetError, ToncastNetworkError } from "./errors.js";
@@ -33,8 +32,8 @@ import type {
   PricedCoin,
   StrategyBreakdown,
 } from "./types.js";
-import { sameAddress } from "./utils/address.js";
 import { withRetry } from "./utils/retry.js";
+import { sourceLabelForAddress } from "./utils/sourceLabel.js";
 import { Throttler } from "./utils/throttle.js";
 import { validateBetParams } from "./validate.js";
 
@@ -125,32 +124,27 @@ export class ToncastTxSdk {
 
   /** @internal */
   public callStonApi<T>(fn: () => Promise<T>, method: string): Promise<T> {
-    return this.stonApiThrottler
-      .run(() =>
-        withRetry(fn, {
-          maxRetries: this.maxRetries,
-          delayMs: this.retryDelayMs,
-        }),
-      )
-      .catch((cause) => {
-        if (cause instanceof ToncastNetworkError) throw cause;
-        throw new ToncastNetworkError("stonApi", method, cause);
-      });
+    // Throttle EACH attempt, not the whole retry chain: otherwise a
+    // retry burst after a 429/5xx ignores minIntervalMs and hammers
+    // the public tier faster than it allows.
+    return withRetry(() => this.stonApiThrottler.run(fn), {
+      maxRetries: this.maxRetries,
+      delayMs: this.retryDelayMs,
+    }).catch((cause) => {
+      if (cause instanceof ToncastNetworkError) throw cause;
+      throw new ToncastNetworkError("stonApi", method, cause);
+    });
   }
 
   /** @internal */
   public callTonClient<T>(fn: () => Promise<T>, method: string): Promise<T> {
-    return this.tonThrottler
-      .run(() =>
-        withRetry(fn, {
-          maxRetries: this.maxRetries,
-          delayMs: this.retryDelayMs,
-        }),
-      )
-      .catch((cause) => {
-        if (cause instanceof ToncastNetworkError) throw cause;
-        throw new ToncastNetworkError("tonClient", method, cause);
-      });
+    return withRetry(() => this.tonThrottler.run(fn), {
+      maxRetries: this.maxRetries,
+      delayMs: this.retryDelayMs,
+    }).catch((cause) => {
+      if (cause instanceof ToncastNetworkError) throw cause;
+      throw new ToncastNetworkError("tonClient", method, cause);
+    });
   }
 
   /**
@@ -232,7 +226,7 @@ export class ToncastTxSdk {
     });
 
     if (!result.feasible) {
-      const source = labelSource(params.source, params.pricedCoins);
+      const source = sourceLabelForAddress(params.source, params.pricedCoins);
       return {
         mode: "market",
         bets: [],
@@ -437,6 +431,7 @@ export class ToncastTxSdk {
       | "pricedCoins"
       | "slippage"
       | "walletReserve"
+      | "allowInsufficientBalance"
     >,
   ): Promise<BetQuote> {
     const walletReserve = params.walletReserve ?? DEFAULT_WALLET_RESERVE;
@@ -457,6 +452,9 @@ export class ToncastTxSdk {
       pricedCoins: params.pricedCoins,
       slippage,
       walletReserve,
+      ...(params.allowInsufficientBalance !== undefined && {
+        allowInsufficientBalance: params.allowInsufficientBalance,
+      }),
       tonDirectGas: TON_DIRECT_GAS,
       customPayloadForwardGas: this.customPayloadForwardGas,
       rates: this.rates,
@@ -491,20 +489,6 @@ export class ToncastTxSdk {
     this.rates.clearCache();
     this.pairsCache.clear();
   }
-}
-
-function labelSource(
-  address: string,
-  pricedCoins: PricedCoin[],
-): BetOption["source"] {
-  if (sameAddress(address, TON_ADDRESS)) return "TON";
-  const found = pricedCoins.find((c) => sameAddress(c.address, address));
-  if (!found) return { address };
-  return {
-    address,
-    ...(found.symbol !== undefined && { symbol: found.symbol }),
-    ...(found.decimals !== undefined && { decimals: found.decimals }),
-  };
 }
 
 // Silences "unused" lint for the intentionally-narrowed LockedInRate re-export.
