@@ -507,13 +507,57 @@ describe("planBetOption", () => {
     expect(lockedInRate).not.toBeNull();
   });
 
-  it("jetton source + allowInsufficientBalance does NOT relax insufficient JETTON balance", async () => {
-    // Jetton delivers 1 TON, bet needs 5.7 TON. Missing jetton balance
-    // is invisible to the wallet — relaxing this case would let the
-    // swap reach the network and burn gas on bounce. Planner MUST
-    // keep feasibility blocked even with the flag.
+  it("jetton source + allowInsufficientBalance DOES relax insufficient JETTON balance (with explicit gas-burn warning)", async () => {
+    // Jetton delivers only 1 TON, bet needs 5.7 TON. With the flag,
+    // planner emits a feasible ESTIMATED quote so the UI can still
+    // render cost / odds. Warning explicitly flags that this is NOT
+    // wallet-caught — the tx WILL broadcast and burn gas. UI decides
+    // whether to confirm + send anyway.
     const pricedCoins = [
       priceTon(2_000_000_000n),
+      priceJettonDirect(USDT, 1_000_000n, 1_000_000_000n),
+    ];
+
+    const { option, lockedInRate } = await planBetOption({
+      bets,
+      totalCost,
+      pariAddress: PARI,
+      beneficiary: BENEFICIARY,
+      isYes: true,
+      referral: null,
+      referralPct: 0,
+      source: USDT,
+      pricedCoins,
+      walletReserve: 50_000_000n,
+      allowInsufficientBalance: true,
+      rates: makeRates() as unknown as RatesClient,
+      apiClient: createMockApiClient(),
+      tonClient: makeFakeTonClient(),
+      callStonApi: identityCaller,
+      callTonClient: identityCaller,
+    });
+
+    expect(option.feasible).toBe(true);
+    if (option.feasible) {
+      expect(option.estimated).toBe(true);
+      expect(option.txs).toEqual([]);
+      expect(option.shortfall).toBeGreaterThan(0n);
+      // Warning must spell out the gas-burn risk so UIs aren't
+      // tempted to treat it like the wallet-caught cases.
+      const combined = option.warnings?.join("\n") ?? "";
+      expect(combined).toContain("insufficient_balance");
+      expect(combined).toMatch(/burn/i);
+    }
+    expect(lockedInRate).not.toBeNull();
+  });
+
+  it("jetton source + allowInsufficientBalance: combined gas + jetton short emits both warnings", async () => {
+    // Both shortfalls present: 0.2 TON wallet (gas short) AND jetton
+    // delivers 1 TON (capacity short vs 5.7 TON bet). Warnings must
+    // surface both; `shortfall` tracks the jetton shortfall (the
+    // dominant, user-actionable one).
+    const pricedCoins = [
+      priceTon(200_000_000n),
       priceJettonDirect(USDT, 1_000_000n, 1_000_000_000n),
     ];
 
@@ -536,9 +580,14 @@ describe("planBetOption", () => {
       callTonClient: identityCaller,
     });
 
-    expect(option.feasible).toBe(false);
-    if (!option.feasible) {
-      expect(option.reason).toBe("insufficient_balance");
+    expect(option.feasible).toBe(true);
+    if (option.feasible) {
+      expect(option.warnings?.length).toBeGreaterThanOrEqual(2);
+      const combined = option.warnings?.join("\n") ?? "";
+      expect(combined).toContain("insufficient_ton_for_gas");
+      expect(combined).toContain("insufficient_balance");
+      // shortfall tracks the jetton-side gap (the one UI shows as "top up X").
+      expect(option.shortfall).toBe(totalCost - 1_000_000_000n);
     }
   });
 

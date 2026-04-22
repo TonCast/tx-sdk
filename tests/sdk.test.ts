@@ -600,31 +600,43 @@ describe("ToncastTxSdk allowInsufficientBalance (preview mode)", () => {
     }
   });
 
-  it("flag does NOT relax jetton balance shortfall (would burn gas)", async () => {
-    const sdk = makeSdk();
-    // Jetton delivers only 1 TON; bet needs 5.7 TON. With flag or not,
-    // this MUST remain infeasible — a signed tx would bounce on-chain
-    // and burn gas.
-    const nonViableJetton: PricedCoin = {
-      address: USDT,
-      amount: 1_000_000n,
-      tonEquivalent: 1_000_000_000n,
-      tonEquivalentExpected: 1_053_000_000n,
-      gasReserve: DIRECT_HOP_JETTON_GAS_ESTIMATE,
-      route: "direct",
-      viable: true, // 1 TON > 0.3 TON gas — would-be viable per priceCoins
-      symbol: "USDT",
-      decimals: 6,
-    };
-    const quote = await new ToncastTxSdk({
-      apiClient: createMockApiClient(),
+  it("flag relaxes jetton balance shortfall too, with explicit gas-burn warning", async () => {
+    // Jetton delivers only 1 TON; bet needs 5.7 TON. With flag on, we
+    // now emit a feasible estimated quote — but the warning flags
+    // that this is the footgun case (tx broadcasts and burns gas).
+    const reverse = buildSimulation({
+      offerAddress: USDT,
+      askAddress: TON_ADDRESS,
+      offerUnits: "7000000", // STON.fi sizes swap independently of user balance
+      askUnits: "5700000000",
+      minAskUnits: "5700000000",
+      priceImpact: "0.01",
+    });
+    const apiClient = createMockApiClient();
+    (apiClient as { simulateReverseSwap?: unknown }).simulateReverseSwap =
+      vi.fn(async () => reverse);
+    const sdk = new ToncastTxSdk({
+      apiClient,
       tonClient: makeFakeTonClient(),
       rateLimits: {
         tonClient: { minIntervalMs: 0 },
         stonApi: { minIntervalMs: 0 },
       },
       maxRetries: 0,
-    }).quoteFixedBet({
+    });
+
+    const thinJetton: PricedCoin = {
+      address: USDT,
+      amount: 1_000_000n,
+      tonEquivalent: 1_000_000_000n,
+      tonEquivalentExpected: 1_053_000_000n,
+      gasReserve: DIRECT_HOP_JETTON_GAS_ESTIMATE,
+      route: "direct",
+      viable: true,
+      symbol: "USDT",
+      decimals: 6,
+    };
+    const quote = await sdk.quoteFixedBet({
       pariAddress: PARI,
       beneficiary: BENEFICIARY,
       isYes: true,
@@ -633,14 +645,31 @@ describe("ToncastTxSdk allowInsufficientBalance (preview mode)", () => {
       referral: null,
       referralPct: 0,
       source: USDT,
-      pricedCoins: [tonPriced(2_000_000_000n), nonViableJetton],
+      pricedCoins: [tonPriced(2_000_000_000n), thinJetton],
       allowInsufficientBalance: true,
     });
-    void sdk;
 
-    expect(quote.option.feasible).toBe(false);
-    if (!quote.option.feasible) {
-      expect(quote.option.reason).toBe("insufficient_balance");
+    expect(quote.option.feasible).toBe(true);
+    if (quote.option.feasible) {
+      expect(quote.option.estimated).toBe(true);
+      expect(quote.option.shortfall).toBeGreaterThan(0n);
+      const combined = quote.option.warnings?.join("\n") ?? "";
+      expect(combined).toContain("insufficient_balance");
+      expect(combined).toMatch(/burn/i);
+    }
+
+    // confirmQuote should proceed — producing a concrete tx the UI
+    // can forward to TonConnect. The on-chain jetton wallet is what
+    // will reject; that's the UX tradeoff the flag makes explicit.
+    const confirmed = await sdk.confirmQuote(quote, {
+      pariAddress: PARI,
+      beneficiary: BENEFICIARY,
+      referral: null,
+      referralPct: 0,
+    });
+    expect(confirmed.option.feasible).toBe(true);
+    if (confirmed.option.feasible) {
+      expect(confirmed.option.txs).toHaveLength(1);
     }
   });
 });

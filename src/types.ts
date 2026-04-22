@@ -200,23 +200,27 @@ export type CommonBetParams = {
   walletReserve?: bigint;
   /**
    * "Preview mode". When `true`, the planner stops bailing out with
-   * `feasible: false` for balance-based shortfalls that the wallet
-   * would catch *before* on-chain broadcast — the TonConnect wallet
-   * already compares `value` to the user's TON balance and refuses to
-   * sign if short, so no gas is burned. The resulting quote carries
-   * `warnings: ["insufficient_balance", ...]` and `shortfall`.
+   * `feasible: false` for balance-based shortfalls — the caller's UI
+   * decides whether to surface the quote and let the user proceed.
+   * The resulting quote carries `warnings: [...]` and `shortfall`.
    *
-   * Specifically, the flag RELAXES:
-   * - TON source: `balance < totalCost + gas + walletReserve`;
-   * - Jetton source: `tonOnWallet < jetton-swap gasReserve + walletReserve`
-   *   (wallet still sees the missing TON in `value` and refuses).
+   * The flag relaxes THREE shortfalls, each with different semantics:
    *
-   * It does NOT relax `insufficient_balance` on a jetton source —
-   * missing *jetton* balance is invisible to the signing wallet, and
-   * the on-chain jetton wallet would bounce the transfer and **burn
-   * gas**. Planner keeps that case `feasible: false`.
+   * - **TON source, balance < totalCost + gas + walletReserve.** The
+   *   TonConnect wallet compares the tx `value` to the user's TON
+   *   balance and refuses to sign. **No gas is burned.**
+   * - **Jetton source, wallet TON < jetton-swap gas reservation.**
+   *   Same protection as above — the tx `value` carries the full gas
+   *   amount, wallet refuses. **No gas is burned.**
+   * - **Jetton source, jetton balance below `totalCost`.** The signing
+   *   wallet cannot see the jetton balance, so the tx reaches the
+   *   network. The on-chain jetton wallet bounces the transfer and
+   *   **~0.01 TON of gas burns**. The emitted warning flags this
+   *   explicitly so UI can show a stronger confirmation dialog (or
+   *   refuse to send entirely).
    *
-   * Default `false` — preserves the historical strict contract.
+   * Default `false` — preserves the historical strict contract
+   * (infeasible on any balance shortfall).
    */
   allowInsufficientBalance?: boolean;
 };
@@ -355,11 +359,14 @@ export type BetOption =
       warnings?: string[];
       /**
        * Present only when `allowInsufficientBalance: true` let a
-       * balance-short quote through. Nano-TON amount the user is short
-       * by; UI can render the missing top-up next to the disabled
-       * "Place Bet" button. The wallet still refuses to sign because
-       * the tx's `value` exceeds the TON balance, so nothing reaches
-       * the network.
+       * balance-short quote through. Amount in TON-equivalent
+       * nano-units that the user is short by.
+       *
+       * When both TON-for-gas AND jetton balance are short, this is
+       * set to the **jetton** shortfall (the user-actionable top-up).
+       * `warnings[]` still surfaces both issues — read it to get the
+       * full story, especially whether the shortfall is wallet-caught
+       * (safe) or jetton-balance (broadcasts and burns gas).
        */
       shortfall?: bigint;
     }

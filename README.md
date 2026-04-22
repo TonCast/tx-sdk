@@ -474,19 +474,29 @@ if (quote.option.feasible) {
 }
 ```
 
-The flag relaxes only the shortfalls that the wallet will still intercept **before** broadcasting the transaction (so no gas is burned):
+The flag relaxes every balance-based shortfall, but **each has a different safety profile** — the emitted `warnings[]` distinguishes them:
 
-| Case | Default | With flag |
-|---|---|---|
-| TON source, balance < totalCost + gas + walletReserve | `feasible: false` (`insufficient_balance`) | `feasible: true`, `warnings: ["insufficient_balance …"]`, `shortfall` set, tx built. Wallet refuses to sign. |
-| Jetton source, wallet TON < swap gas reservation | `feasible: false` (`insufficient_ton_for_gas`) | `feasible: true` (`estimated`), `warnings: ["insufficient_ton_for_gas …"]`, `shortfall` set. `confirmQuote` finalises the tx; wallet refuses to sign because tx `value` exceeds the TON balance. |
-| **Jetton source, jetton balance below `totalCost`** | `feasible: false` (`insufficient_balance`) | **Still `feasible: false`.** The wallet cannot see missing jetton balance, so signing would succeed and the jetton wallet would bounce the transfer on-chain, **burning gas**. The flag deliberately keeps this blocked. |
+| Case | Default | With flag | Safety |
+|---|---|---|---|
+| TON source, balance < totalCost + gas + walletReserve | `feasible: false` (`insufficient_balance`) | `feasible: true`, `warnings: ["insufficient_balance …"]`, `shortfall` set, tx built. | **Wallet-caught.** TonConnect refuses to sign (`value` > balance). No gas burned. |
+| Jetton source, wallet TON < swap gas reservation | `feasible: false` (`insufficient_ton_for_gas`) | `feasible: true` (`estimated`), `warnings: ["insufficient_ton_for_gas …"]`, `shortfall` set. `confirmQuote` produces a concrete tx. | **Wallet-caught.** Tx `value` includes the full gas amount, wallet refuses to sign. No gas burned. |
+| **Jetton source, jetton balance below `totalCost`** | `feasible: false` (`insufficient_balance`) | `feasible: true` (`estimated`), `warnings: ["insufficient_balance … burn …"]`, `shortfall` set. `confirmQuote` produces a concrete tx. | **NOT wallet-caught.** The signing wallet cannot see the jetton balance. If the UI forwards the tx, it reaches the network, the jetton wallet bounces the transfer on-chain, and **~0.01 TON of gas burns.** |
+
+Reading the warning string is the only way to tell these apart after the fact. The jetton-balance warning always contains the word **`burn`** in its text — grep for it in UI code if you want to refuse sending without an extra confirmation.
+
+```ts
+function isGasBurnRisk(warnings: string[] | undefined): boolean {
+  return warnings?.some((w) => /burn/i.test(w)) ?? false;
+}
+```
 
 UI using the flag should:
 
 1. Always read `quote.totalCost`, `calcWinnings(bets, referralPct)`, etc. to render cost / payout info regardless of feasibility.
-2. Enable the "Place Bet" button only when `option.feasible === true` **and** `option.shortfall === undefined` (no residual balance gap).
-3. Show the `shortfall` as a "Top up X TON" banner otherwise.
+2. For `option.feasible === true` with `shortfall` set:
+   - Inspect `option.warnings`. If `isGasBurnRisk(option.warnings)` — show a stronger confirmation dialog explaining that ~0.01 TON of gas will be spent and the bet will not go through (because the user is short on the jetton itself). Let the user choose.
+   - Otherwise (wallet-caught cases) — a lighter banner "Wallet will ask you to top up" is enough; the UI can let the user proceed and TonConnect will refuse harmlessly.
+3. For `option.feasible === false` — these are *non-balance* blockers (`no_route`, `source_not_viable`, `source_not_in_priced_coins`, `ton_client_required`, `budget_too_small_for_single_entry`). Surface the `reason` as an error; never fall through to `confirmQuote` (it throws `QUOTE_INFEASIBLE`).
 
 ## Subscriptions
 

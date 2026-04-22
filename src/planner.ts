@@ -284,23 +284,29 @@ function planJettonOption(args: {
   }
 
   // Capacity check — if the jetton's pessimistic full-amount delivery
-  // (`tonEquivalent`) can't cover `totalCost`, fail early without
-  // pretending we could build a quote. For jetton sources
-  // `availableForBet` is just `tonEquivalent`; factoring it through the
-  // helper keeps the test symmetric with the TON-direct path.
+  // (`tonEquivalent`) can't cover `totalCost`, there are not enough
+  // jettons to fund the bet. For jetton sources `availableForBet` is
+  // just `tonEquivalent`; factoring it through the helper keeps the
+  // test symmetric with the TON-direct path.
   //
-  // Note: `allowInsufficientBalance` does NOT relax this branch.
-  // Missing jetton balance is invisible to the signing wallet, so a
-  // short balance would let the swap reach the network and burn gas
-  // when the jetton wallet bounces the transfer. Keep the hard block.
+  // `allowInsufficientBalance: true` relaxes this check too, BUT with
+  // a material caveat: unlike TON / gas shortfalls, the signing wallet
+  // cannot see the jetton balance. It will happily sign the tx, the
+  // outer jetton wallet will bounce the transfer on-chain, and ~0.01
+  // TON of gas burns. The warning message flags this explicitly so UI
+  // can surface the risk — e.g. stronger confirmation dialog for the
+  // jetton-short case vs. the "wallet catches it" TON / gas cases.
   const capacity = availableForBet(picked, input.walletReserve);
-  if (capacity < input.totalCost) {
+  const jettonShortBy =
+    capacity < input.totalCost ? input.totalCost - capacity : 0n;
+
+  if (jettonShortBy > 0n && !input.allowInsufficientBalance) {
     return {
       option: {
         feasible: false,
         source,
         reason: "insufficient_balance",
-        shortfall: input.totalCost - capacity,
+        shortfall: jettonShortBy,
       },
       lockedInRate: null,
     };
@@ -312,34 +318,33 @@ function planJettonOption(args: {
   //
   //   offerUnits ≈ picked.amount × totalCost / picked.tonEquivalent
   //
-  // This is a pessimistic estimate — smaller swaps have lower priceImpact,
-  // so the real `offerUnits` computed by `confirmQuote`'s reverse-sim will
-  // typically be slightly LOWER. The user doesn't lose here: the UI just
-  // shows a conservative number; `confirmQuote` tightens it before signing.
-  //
-  // Using `picked.tonEquivalent` (which is `minAskUnits` from the full-amount
-  // simulate) already bakes in the user's slippage tolerance; no extra
-  // gross-up needed.
+  // When `capacity >= totalCost` (strict mode or preview with enough
+  // jettons) this yields `offerUnits ≤ amount`. When the flag lets a
+  // jetton-short quote through, `offerUnits > amount` is expected —
+  // we emit it anyway so `confirmQuote` can produce a concrete tx;
+  // the on-chain jetton wallet rejects the transfer at send time.
   const estimatedOfferUnits = ceilDivBig(
     picked.amount * input.totalCost,
     picked.tonEquivalent,
   );
 
-  if (picked.amount < estimatedOfferUnits) {
-    // Shouldn't happen given the `availableForBet >= totalCost` guard
-    // above, but the arithmetic might drift by 1 unit due to ceiling
-    // rounding — treat as a balance shortfall rather than build a
-    // broken plan.
-    return {
-      option: {
-        feasible: false,
-        source,
-        reason: "insufficient_balance",
-        shortfall: estimatedOfferUnits - picked.amount,
-      },
-      lockedInRate: null,
-    };
+  // Aggregate preview-mode warnings. Order matters for UI: jetton
+  // shortfall is the user-actionable top-up (they must top up the
+  // jetton), so it wins the single `shortfall` field when both are
+  // present. Both warnings are always emitted for transparency.
+  const previewWarnings: string[] = [];
+  if (gasShortBy > 0n) {
+    previewWarnings.push(
+      `insufficient_ton_for_gas: wallet is short ${gasShortBy} nano-TON for jetton-swap gas — signing will be refused until topped up`,
+    );
   }
+  if (jettonShortBy > 0n) {
+    previewWarnings.push(
+      `insufficient_balance: jetton balance is short by ${jettonShortBy} nano-TON of TON-equivalent — the signing wallet does NOT see this, so the tx WILL broadcast and burn ~0.01 TON of gas when the jetton wallet bounces the transfer. UI should show an explicit confirmation.`,
+    );
+  }
+  const previewShortfall =
+    jettonShortBy > 0n ? jettonShortBy : gasShortBy > 0n ? gasShortBy : 0n;
 
   // Synthesise a placeholder `DiscoveredRoute` so `confirmQuote` knows
   // which route shape to re-simulate. Leg-level simulation fields are
@@ -391,15 +396,9 @@ function planJettonOption(args: {
       },
       slippage,
       route: isDirect ? "direct" : { intermediate: routeShape.intermediate },
-      // Preview mode for jetton source: TON gas reservation short but
-      // the tx's `value` still carries the full gas amount, so the
-      // TonConnect wallet refuses to sign the tx that `confirmQuote`
-      // eventually produces. Safe to surface as a feasible preview.
-      ...(gasShortBy > 0n && {
-        warnings: [
-          `insufficient_ton_for_gas: wallet is short ${gasShortBy} nano-TON for jetton-swap gas — signing will be refused until topped up`,
-        ],
-        shortfall: gasShortBy,
+      ...(previewWarnings.length > 0 && {
+        warnings: previewWarnings,
+        shortfall: previewShortfall,
       }),
     },
     lockedInRate: {
