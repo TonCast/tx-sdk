@@ -192,16 +192,56 @@ async function priceOne(args: {
     });
 
     // For a direct route the final TON delivery is leg1's ask; for a
-    // cross-hop it's leg2's ask (intermediate → TON). In both cases we
-    // capture BOTH the pessimistic floor (minAskUnits) and the expected
-    // output (askUnits).
+    // cross-hop it's leg2's ask (intermediate → TON). `askUnits` is the
+    // expected pool output (no slippage applied — this is just the raw
+    // pool price); `minAskUnits` is what STON.fi computed for the
+    // slippage we passed in.
     const finalLeg = route.type === "direct" ? route.leg1 : route.leg2;
-    const tonEquivalent = BigInt(finalLeg.minAskUnits || "0");
     const tonEquivalentExpected = BigInt(finalLeg.askUnits || "0");
+    const minAskUnitsAtUserSlippage = BigInt(finalLeg.minAskUnits || "0");
     const gasReserve =
       route.type === "direct"
         ? DIRECT_HOP_JETTON_GAS_ESTIMATE
         : CROSS_HOP_JETTON_GAS_ESTIMATE;
+
+    // STON.fi's per-pool slippage recommendation. For cross-hop, take
+    // the WORST (= larger) of the two legs — that hop dominates the
+    // on-chain failure risk. Falls back to the user-provided slippage
+    // when STON.fi does not return a recommendation (some pools omit
+    // the field or return "0" / empty).
+    const recommendedSlippage = pickRecommendedSlippage(route);
+    const userSlippage = slippage;
+    // Effective slippage = min(recommended, user-set max). The user
+    // set their max as a hard ceiling; STON.fi can only TIGHTEN it,
+    // never relax it past what the user agreed to risk.
+    const effectiveSlippage = recommendedSlippage
+      ? minSlippage(recommendedSlippage, userSlippage)
+      : userSlippage;
+
+    // `tonEquivalent` is the floor the planner / confirmQuote enforce
+    // for this coin. We pin it to the effective slippage:
+    //   - if recommended ≤ user: use STON.fi's recommendedMinAskUnits
+    //     directly when it lines up (final leg only), otherwise
+    //     compute locally from the expected output;
+    //   - if recommended > user (STON.fi wants more headroom than the
+    //     user allows): clamp at user's max via askUnits × (1 − user).
+    const recommendedMinAskUnits = pickRecommendedMinAskUnits(route);
+    const tonEquivalent = computeFloorFromExpected(
+      tonEquivalentExpected,
+      effectiveSlippage,
+      // Use STON.fi-supplied floor when it matches the chosen slippage
+      // bucket (avoids a redundant local approximation on its own
+      // computation). Only valid for direct route — for cross we
+      // compose both legs locally below.
+      route.type === "direct" &&
+        recommendedSlippage !== undefined &&
+        sameSlippage(recommendedSlippage, effectiveSlippage)
+        ? recommendedMinAskUnits
+        : minAskUnitsAtUserSlippage &&
+            sameSlippage(userSlippage, effectiveSlippage)
+          ? minAskUnitsAtUserSlippage
+          : undefined,
+    );
 
     // `viable` filters dust jettons: if the swap delivers less TON than
     // it costs in wallet gas, using this coin is net-destructive. Note
@@ -225,6 +265,9 @@ async function priceOne(args: {
         : {
             reason: `swap delivers ${tonEquivalent} nano-TON but costs ${gasReserve} TON in wallet gas — net-destructive.`,
           }),
+      ...(recommendedSlippage !== undefined && { recommendedSlippage }),
+      ...(recommendedMinAskUnits !== undefined && { recommendedMinAskUnits }),
+      effectiveSlippage,
     };
   } catch (cause) {
     return {
@@ -240,4 +283,101 @@ async function priceOne(args: {
           : String(cause ?? "no route to TON"),
     };
   }
+}
+
+// ─── slippage helpers ──────────────────────────────────────────────────────
+
+/**
+ * Extract STON.fi's per-pool slippage recommendation.
+ *
+ * For direct routes — leg1's `recommendedSlippageTolerance`.
+ * For cross-hop — the LARGER of the two leg recommendations: that
+ * leg dominates the on-chain failure risk, so the conservative pick
+ * is the one closer to the user-set ceiling. Returns `undefined` if
+ * neither leg has a usable value (some pools omit the field or
+ * return `"0"` / empty string).
+ */
+function pickRecommendedSlippage(route: {
+  type: "direct" | "cross";
+  leg1: { recommendedSlippageTolerance?: string | null };
+  leg2?: { recommendedSlippageTolerance?: string | null };
+}): string | undefined {
+  const leg1 = parseSlippage(route.leg1.recommendedSlippageTolerance);
+  if (route.type === "direct") return leg1;
+  const leg2 = parseSlippage(route.leg2?.recommendedSlippageTolerance);
+  if (leg1 === undefined) return leg2;
+  if (leg2 === undefined) return leg1;
+  return numericSlippage(leg1) >= numericSlippage(leg2) ? leg1 : leg2;
+}
+
+/**
+ * Mirror {@link pickRecommendedSlippage} but for the precomputed floor
+ * value. Only meaningful for direct routes (cross-hop floors compose
+ * non-trivially across legs and are recomputed locally instead).
+ */
+function pickRecommendedMinAskUnits(route: {
+  type: "direct" | "cross";
+  leg1: { recommendedMinAskUnits?: string | null };
+  leg2?: { recommendedMinAskUnits?: string | null };
+}): bigint | undefined {
+  const finalLeg = route.type === "direct" ? route.leg1 : route.leg2;
+  const raw = finalLeg?.recommendedMinAskUnits;
+  if (!raw) return undefined;
+  try {
+    const v = BigInt(raw);
+    return v > 0n ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Validate a slippage string and return it normalised, or `undefined`
+ * when missing / non-numeric / outside `[0, 1)`. Treats `"0"` as
+ * "STON.fi did not return a useful value" — a recommendation of 0
+ * makes no sense in practice and would otherwise lock effective
+ * slippage to zero, guaranteeing on-chain reverts on any pool drift.
+ */
+function parseSlippage(raw: string | null | undefined): string | undefined {
+  if (raw === null || raw === undefined || raw === "") return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0 || n >= 1) return undefined;
+  return raw;
+}
+
+function numericSlippage(s: string): number {
+  return Number(s);
+}
+
+function minSlippage(a: string, b: string): string {
+  return numericSlippage(a) <= numericSlippage(b) ? a : b;
+}
+
+/**
+ * Compare two slippage strings as numbers with a tiny epsilon so
+ * `"0.005"` vs `0.005000001` doesn't accidentally diverge.
+ */
+function sameSlippage(a: string, b: string): boolean {
+  return Math.abs(numericSlippage(a) - numericSlippage(b)) < 1e-9;
+}
+
+/**
+ * Compute `askUnits × (1 − slippage)` in bigint with `1e9`-scale
+ * fixed-point math. Falls back to a STON.fi-supplied precomputed
+ * value when it's already correct for this slippage (one less local
+ * approximation, byte-identical to whatever the DEX would return).
+ */
+function computeFloorFromExpected(
+  expected: bigint,
+  slippage: string,
+  precomputed?: bigint,
+): bigint {
+  if (precomputed !== undefined && precomputed > 0n) return precomputed;
+  if (expected <= 0n) return 0n;
+  const SCALE = 1_000_000_000n;
+  const slip = numericSlippage(slippage);
+  if (slip <= 0) return expected;
+  const keep = SCALE - BigInt(Math.round(slip * Number(SCALE)));
+  if (keep <= 0n) return 0n;
+  return (expected * keep) / SCALE;
 }

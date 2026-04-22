@@ -229,8 +229,13 @@ function planJettonOption(args: {
   slippage: string;
   tonOnWallet: bigint;
 }): PlanBetOptionResult {
-  const { picked, input, slippage, tonOnWallet } = args;
+  const { picked, input, tonOnWallet } = args;
   const source = sourceLabelFromPriced(picked);
+  // Prefer the per-coin effective slippage that `priceCoins` already
+  // resolved (= min(STON.fi-recommended, user-set)). Falls back to
+  // the input slippage when the coin entry pre-dates this field
+  // (third-party callers building `PricedCoin`s by hand).
+  const slippage = picked.effectiveSlippage ?? args.slippage;
 
   if (!input.tonClient) {
     return {

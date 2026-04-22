@@ -364,6 +364,27 @@ Use `tonEquivalentExpected` in user-facing labels so the displayed swap output m
 
 No bet parameters are required for `priceCoins`. Viability is a pure property of "is swapping this coin net-positive in TON?" — independent of bet sizing.
 
+### Per-pool slippage (`recommendedSlippage` / `effectiveSlippage`)
+
+`priceCoins` reads STON.fi's per-pool slippage recommendation from each simulation and uses it to **tighten** the slippage actually applied to that coin's swaps. The user-set `slippage` becomes a hard ceiling, never a floor:
+
+```
+effectiveSlippage = min(stonfi.recommendedSlippageTolerance, userSlippage)
+```
+
+For a deep pool like USDT/TON, STON.fi often recommends ~0.3 %, so `effectiveSlippage` collapses well below the default 5 % — the user spends fewer source jettons for the same TON delivery. For a thin memecoin pool that wants 7 % headroom while the user only allowed 5 %, the SDK clamps at 5 % (and the swap may revert at the user's tighter floor — that's the user's policy choice).
+
+Each `PricedCoin` exposes:
+
+| Field | Source | Meaning |
+|---|---|---|
+| `recommendedSlippage?` | STON.fi `recommendedSlippageTolerance` (worst-leg for cross-hop) | What STON.fi suggests for this pool + this swap size. |
+| `recommendedMinAskUnits?` | STON.fi `recommendedMinAskUnits` (final leg) | TON floor at `recommendedSlippage`, raw from STON.fi. |
+| `effectiveSlippage?` | `min(recommended, userSlippage)` | What the SDK actually applies — to `tonEquivalent`, planner's `offerUnits` estimate, `lockedInRate.slippage`, and ultimately the reverse-sim grossUp inside `confirmQuote`. |
+| `tonEquivalent` | computed at `effectiveSlippage` | Floor delivery used by `availableForBet` and the planner. |
+
+UI can read `recommendedSlippage` to display "STON.fi recommends 0.3 % · you set 5 %" and `effectiveSlippage` to confirm what the SDK will actually use. End-to-end: `priceCoins` → `quoteXxxBet` → `confirmQuote` all carry the same `effectiveSlippage` for the chosen source — no double-counting, no extra API roundtrip.
+
 ## Confirming a quote before signing
 
 `confirmQuote` is the **authoritative** step that produces a signed-ready `BetQuote` for jetton sources. Behaviour:

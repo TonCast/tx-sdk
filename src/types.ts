@@ -122,6 +122,37 @@ export type PricedCoin = {
   viable: boolean;
   /** Human-readable explanation when `!viable`. */
   reason?: string;
+  /**
+   * STON.fi's per-pool slippage recommendation, decimal fraction
+   * (e.g. `"0.003"` for 0.3 %). Computed on STON.fi side from pool
+   * depth + this swap size. For cross-hop routes this is the
+   * **larger** of the two leg recommendations (worst-leg dominates
+   * on-chain), so reflects what the riskiest hop wants. Absent for
+   * TON sources and for entries where STON.fi did not return it.
+   */
+  recommendedSlippage?: string;
+  /**
+   * Final TON delivery floor at `recommendedSlippage` — i.e.
+   * STON.fi's `recommendedMinAskUnits`. Will typically be HIGHER
+   * than `tonEquivalent` (= floor at `effectiveSlippage`, which
+   * itself is `min(recommendedSlippage, userSlippage)`). Use it for
+   * "what could you get if you accepted STON.fi's recommendation
+   * directly" UI hints. Absent for TON sources.
+   */
+  recommendedMinAskUnits?: bigint;
+  /**
+   * Slippage actually used to compute `tonEquivalent` (= the floor
+   * the planner / `confirmQuote` enforce on swaps for this coin).
+   *
+   * `effectiveSlippage = min(recommendedSlippage, userSlippage)`,
+   * with `userSlippage` defaulting to {@link DEFAULT_SLIPPAGE}. This
+   * means the SDK applies STON.fi's tighter recommendation when the
+   * pool is deep enough, but never relaxes the user-set ceiling — a
+   * pool that wants more slippage than the user agreed to gets
+   * capped (and may revert at the user's ceiling, which is the
+   * user's choice). Absent for TON sources.
+   */
+  effectiveSlippage?: string;
 };
 
 /**

@@ -501,6 +501,85 @@ describe("ToncastTxSdk jetton source", () => {
   });
 });
 
+describe("ToncastTxSdk effectiveSlippage propagation", () => {
+  it("uses PricedCoin.effectiveSlippage for the actual swap (not user max)", async () => {
+    // Jetton priced with effectiveSlippage 0.005 (recommended < user max).
+    // After confirmQuote, simulateReverseSwap MUST be called with that
+    // tighter slippage — proves end-to-end propagation through
+    // lockedInRate.slippage.
+    const reverseSpy = vi.fn(async () =>
+      buildSimulation({
+        offerAddress: USDT,
+        askAddress: TON_ADDRESS,
+        offerUnits: "5670000",
+        askUnits: "5700000000",
+        minAskUnits: "5700000000",
+        priceImpact: "0.001",
+      }),
+    );
+    const apiClient = createMockApiClient();
+    (apiClient as { simulateReverseSwap?: unknown }).simulateReverseSwap =
+      reverseSpy;
+
+    const sdk = new ToncastTxSdk({
+      apiClient,
+      tonClient: makeFakeTonClient(),
+      rateLimits: {
+        tonClient: { minIntervalMs: 0 },
+        stonApi: { minIntervalMs: 0 },
+      },
+      maxRetries: 0,
+    });
+
+    const usdtPriced: PricedCoin = {
+      address: USDT,
+      amount: 100_000_000n,
+      tonEquivalent: 49_750_000_000n, // floor at 0.005
+      tonEquivalentExpected: 50_000_000_000n,
+      gasReserve: DIRECT_HOP_JETTON_GAS_ESTIMATE,
+      route: "direct",
+      viable: true,
+      symbol: "USDT",
+      decimals: 6,
+      recommendedSlippage: "0.005",
+      effectiveSlippage: "0.005",
+    };
+
+    const quote = await sdk.quoteFixedBet({
+      pariAddress: PARI,
+      beneficiary: BENEFICIARY,
+      isYes: true,
+      yesOdds: 56,
+      ticketsCount: 100,
+      referral: null,
+      referralPct: 0,
+      source: USDT,
+      pricedCoins: [tonPriced(1_000_000_000n), usdtPriced],
+      // User passed 0.05 — this should NOT win over PricedCoin.effectiveSlippage.
+      slippage: "0.05",
+    });
+
+    expect(quote.lockedInRate?.slippage).toBe("0.005");
+
+    await sdk.confirmQuote(quote, {
+      pariAddress: PARI,
+      beneficiary: BENEFICIARY,
+      referral: null,
+      referralPct: 0,
+    });
+
+    // The reverse-sim call must have been issued at the tighter
+    // effective slippage, not the user-set max.
+    expect(reverseSpy).toHaveBeenCalledTimes(1);
+    const call = (
+      reverseSpy.mock.calls[0] as unknown as
+        | [{ slippageTolerance: string }]
+        | undefined
+    )?.[0];
+    expect(call?.slippageTolerance).toBe("0.005");
+  });
+});
+
 describe("ToncastTxSdk allowInsufficientBalance (preview mode)", () => {
   it("TON source: short balance → feasible quote with warnings + shortfall, tx built", async () => {
     const sdk = makeSdk();
