@@ -24,17 +24,19 @@ function emptyOddsState(): OddsState {
   };
 }
 
-function tonPriced(amount: bigint): PricedCoin {
+function tonPriced(amount: bigint, walletReserve = 50_000_000n): PricedCoin {
+  // tonEquivalent now reflects the spendable budget for TON sources too
+  // (= amount − walletReserve − gasReserve). Same field, same meaning,
+  // for both TON and jetton — UI sliders read it uniformly.
+  const usable = amount > walletReserve ? amount - walletReserve : 0n;
   return {
     address: TON_ADDRESS,
     amount,
-    tonEquivalent: amount,
-    tonEquivalentExpected: amount,
-    // TON_DIRECT_GAS = 0n by default; PARI_EXECUTION_FEE inside
-    // totalCost covers Pari-side processing gas already.
+    tonEquivalent: usable,
+    tonEquivalentExpected: usable,
     gasReserve: 0n,
     route: "direct",
-    viable: amount > 50_000_000n,
+    viable: usable > 0n,
   };
 }
 

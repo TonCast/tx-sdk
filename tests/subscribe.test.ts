@@ -21,16 +21,16 @@ function makeSdk() {
   });
 }
 
-function tonPriced(amount: bigint): PricedCoin {
+function tonPriced(amount: bigint, walletReserve = 50_000_000n): PricedCoin {
+  const usable = amount > walletReserve ? amount - walletReserve : 0n;
   return {
     address: TON_ADDRESS,
     amount,
-    tonEquivalent: amount,
-    tonEquivalentExpected: amount,
-    // TON_DIRECT_GAS = 0n by default: see src/constants.ts.
+    tonEquivalent: usable,
+    tonEquivalentExpected: usable,
     gasReserve: 0n,
     route: "direct",
-    viable: true,
+    viable: usable > 0n,
   };
 }
 

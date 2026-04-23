@@ -356,12 +356,16 @@ Why no gas subtraction for jettons: swap gas (`gasReserve`, 0.3/0.6 TON) is paid
 
 ### `tonEquivalent` vs `tonEquivalentExpected`
 
-Both refer to the gross TON output of the full-amount swap — the difference is what slippage assumption they use.
+Both refer to **how much TON this coin can contribute to a bet** — uniform meaning across TON and jetton sources. The difference is whether the slippage assumption is pessimistic or expected.
 
-- **`tonEquivalent`** = `minAskUnits` = slippage-adjusted floor. The DEX will refuse to deliver less. Used by `availableForBet` and by the planner's capacity check.
-- **`tonEquivalentExpected`** = `askUnits` = expected delivery under stable pool conditions. ~5% higher at the default 5% slippage. Best for UI "you'll get ~X TON" labels.
+| Source | `tonEquivalent` (pessimistic floor) | `tonEquivalentExpected` (optimistic) |
+|---|---|---|
+| Jetton | `minAskUnits` from STON.fi (= `askUnits × (1 − slippage)`) | `askUnits` from STON.fi |
+| TON | `amount − walletReserve − gasReserve` (no slippage axis) | same as `tonEquivalent` (collapses) |
 
-Use `tonEquivalentExpected` in user-facing labels so the displayed swap output matches the realistic delivery. Use `availableForBet` / `tonEquivalent` for the safety-critical path — they represent the guaranteed floor.
+For TON sources `tonEquivalent === tonEquivalentExpected === availableForBet(coin, walletReserve)`. The raw on-wallet balance is still available as `coin.amount`.
+
+**UI rule of thumb**: read `coin.tonEquivalent` for slider maxima and `maxBudgetTon` arguments to `quoteXxxBet`. `tonEquivalentExpected` is only meaningful for jetton sources where the gap between expected and floor is non-zero (slippage band) and you want to show "~X TON expected" alongside the guaranteed floor. The safety-critical numbers (`availableForBet`, `option.breakdown.spend`) use `tonEquivalent`.
 
 No bet parameters are required for `priceCoins`. Viability is a pure property of "is swapping this coin net-positive in TON?" — independent of bet sizing.
 

@@ -19,7 +19,7 @@ async function identityCaller<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 describe("priceCoins", () => {
-  it("TON: viable, availableForBet = amount − walletReserve − TON_DIRECT_GAS", async () => {
+  it("TON: viable, tonEquivalent === availableForBet (= amount − walletReserve − TON_DIRECT_GAS)", async () => {
     const apiClient = createMockApiClient();
     const priced = await priceCoins({
       availableCoins: [{ address: TON_ADDRESS, amount: 10_000_000_000n }],
@@ -32,10 +32,13 @@ describe("priceCoins", () => {
     expect(c?.viable).toBe(true);
     expect(c?.route).toBe("direct");
     expect(c?.gasReserve).toBe(TON_DIRECT_GAS);
-    expect(c?.tonEquivalent).toBe(10_000_000_000n);
-    expect(availableForBet(c!, 50_000_000n)).toBe(
-      10_000_000_000n - 50_000_000n - TON_DIRECT_GAS,
-    );
+    // tonEquivalent for TON is now the spendable amount, not the raw
+    // balance. The raw balance lives on `coin.amount`.
+    const usable = 10_000_000_000n - 50_000_000n - TON_DIRECT_GAS;
+    expect(c?.tonEquivalent).toBe(usable);
+    expect(c?.tonEquivalentExpected).toBe(usable);
+    expect(c?.amount).toBe(10_000_000_000n);
+    expect(availableForBet(c!, 50_000_000n)).toBe(usable);
   });
 
   it("TON: tiny balance → non-viable with human-readable reason", async () => {

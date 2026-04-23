@@ -67,17 +67,19 @@ async function identityCaller<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /** Build a minimal valid PricedCoin for TON. */
-function priceTon(amount: bigint): PricedCoin {
+function priceTon(amount: bigint, walletReserve = 50_000_000n): PricedCoin {
+  // priceCoins() now collapses tonEquivalent / tonEquivalentExpected to
+  // `usable` for TON — keeps the field meaning symmetric with jetton
+  // ("how many TON can this coin contribute to a bet").
+  const usable = amount > walletReserve ? amount - walletReserve : 0n;
   return {
     address: TON_ADDRESS,
     amount,
-    tonEquivalent: amount,
-    tonEquivalentExpected: amount,
-    // TON_DIRECT_GAS = 0n by default: see src/constants.ts.
+    tonEquivalent: usable,
+    tonEquivalentExpected: usable,
     gasReserve: 0n,
     route: "direct",
-    // Viable when balance > walletReserve (50_000_000n in tests).
-    viable: amount > 50_000_000n,
+    viable: usable > 0n,
   };
 }
 

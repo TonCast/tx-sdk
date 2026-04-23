@@ -156,10 +156,17 @@ async function priceOne(args: {
     const usable = coin.amount > required ? coin.amount - required : 0n;
     return {
       ...meta,
-      // For TON, no swap is involved — min and expected collapse to the
-      // same number, the raw balance.
-      tonEquivalent: coin.amount,
-      tonEquivalentExpected: coin.amount,
+      // For TON the slippage axis is degenerate (no swap involved), so
+      // `tonEquivalent` and `tonEquivalentExpected` collapse to the
+      // same value. We pin both to `usable` (= `amount − walletReserve
+      // − gasReserve`) so that the field carries the same meaning for
+      // every coin: "how many TON can this coin contribute to a bet".
+      // UI sliders can read `tonEquivalent` uniformly for TON and
+      // jetton sources without any per-source branching, mirroring
+      // jetton's `minAskUnits` semantics. The raw on-wallet balance
+      // remains accessible via `coin.amount`.
+      tonEquivalent: usable,
+      tonEquivalentExpected: usable,
       gasReserve,
       route: "direct",
       viable: usable > 0n,

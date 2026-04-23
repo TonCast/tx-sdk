@@ -77,23 +77,30 @@ export type PricedCoin = {
   /** Balance, echoed from input. */
   amount: bigint;
   /**
-   * **Pessimistic** gross TON output of the full swap. For jettons this
-   * is `minAskUnits` from STON.fi (= `askUnits × (1 − slippage)`): the
-   * guaranteed floor that the DEX refuses to deliver below. For TON
-   * itself: equals `amount`.
+   * **Pessimistic TON contribution** the coin can put into a bet.
    *
-   * Use this for feasibility checks — planner's `availableForBet ≥ totalCost`
-   * guard relies on the floor so the bet can't fail for want of TON.
+   * - Jetton: `minAskUnits` from STON.fi (= `askUnits × (1 − slippage)`),
+   *   the guaranteed swap floor.
+   * - TON: `amount − walletReserve − gasReserve` (= `availableForBet`
+   *   for the same `walletReserve`). The wallet-side overhead is
+   *   pre-deducted so this number is "spendable" in the same sense as
+   *   for jetton — no per-source branching needed in UI sizing.
+   *
+   * Always use this for feasibility checks and slider maxima. The raw
+   * wallet balance (without overhead deduction) is still available via
+   * {@link amount}.
    */
   tonEquivalent: bigint;
   /**
-   * **Expected** gross TON output of the full swap in stable pool
-   * conditions. For jettons this is `askUnits` from STON.fi — the
-   * slippage-unadjusted projection. For TON: equals `amount` (no swap
-   * involved, nothing to slippage).
+   * **Expected TON contribution** in stable pool conditions.
    *
-   * Use this for UI display. It is typically `tonEquivalent / (1 − slippage)`,
-   * i.e. ~5% higher than the pessimistic floor at the default 5% slippage.
+   * - Jetton: `askUnits` from STON.fi — the slippage-unadjusted
+   *   projection. Typically `tonEquivalent / (1 − slippage)`, ~5 %
+   *   higher than the pessimistic floor at the default 5 % slippage.
+   * - TON: equals `tonEquivalent` (no swap, nothing to slippage —
+   *   pessimistic and expected collapse to the same `usable` value).
+   *
+   * Use this for "you'll get ~X TON" UI labels.
    */
   tonEquivalentExpected: bigint;
   /**

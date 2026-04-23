@@ -4,6 +4,47 @@ All notable changes to `@toncast/tx-sdk` will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.2]
+
+### Changed
+
+- **`PricedCoin.tonEquivalent` and `PricedCoin.tonEquivalentExpected`
+  for TON sources now collapse to the spendable amount** (=
+  `amount − walletReserve − gasReserve`), instead of the raw on-wallet
+  balance.
+  - Field meaning is now **uniform** across TON and jetton: "how much
+    TON can this coin contribute to a bet". UI sliders read
+    `tonEquivalent` directly without a per-source branch — matches the
+    way jetton sources have always worked (`minAskUnits` from STON.fi).
+  - Eliminates the failure mode introduced in 0.1.1 where UI passed
+    `coin.amount` as `maxBudgetTon`, the strategy filled it almost
+    entirely, planner emitted an `insufficient_balance` warning under
+    `allowInsufficientBalance: true`, and the wallet refused to sign
+    when `value + send-fee > balance`. With the new semantics, sliders
+    bound by `tonEquivalent` (or by `maxBudgetTon = tonEquivalent`)
+    leave `walletReserve` untouched on the wallet automatically.
+  - The raw on-wallet balance remains available as `coin.amount`.
+- `availableForBet(coin, walletReserve)` semantics unchanged — for TON
+  it still recomputes from `coin.amount`, so it can be called with a
+  different `walletReserve` than `priceCoins` was given. When the same
+  reserve is used, it returns exactly `coin.tonEquivalent`.
+- Documentation in `pricing.ts`, `types.ts` updated; test fixtures
+  (`priceTon` / `tonPriced` helpers) and assertions adjusted.
+
+### Notes
+
+- Jetton-source pricing is unchanged.
+- `availableForBet` and `BetOption.breakdown.spend` are unaffected (they
+  already returned the correct numbers); this release just makes
+  `tonEquivalent` itself the single source of truth for UI sizing.
+- Combined with 0.1.1's `TON_DIRECT_GAS = 0n`, the recommended UI flow
+  now is:
+  1. `slider.max = coin.tonEquivalent`,
+  2. `quoteXxxBet({ maxBudgetTon: coin.tonEquivalent })` (Market mode)
+     or any value `≤ coin.tonEquivalent` (Fixed / Limit),
+  3. `quote.option.breakdown.spend` matches what the wallet shows as
+     "Sent" pixel-for-pixel.
+
 ## [0.1.1]
 
 ### Changed
