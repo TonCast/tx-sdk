@@ -73,9 +73,11 @@ function priceTon(amount: bigint): PricedCoin {
     amount,
     tonEquivalent: amount,
     tonEquivalentExpected: amount,
-    gasReserve: 50_000_000n,
+    // TON_DIRECT_GAS = 0n by default: see src/constants.ts.
+    gasReserve: 0n,
     route: "direct",
-    viable: amount > 100_000_000n,
+    // Viable when balance > walletReserve (50_000_000n in tests).
+    viable: amount > 50_000_000n,
   };
 }
 
@@ -126,7 +128,9 @@ describe("planBetOption", () => {
     if (option.feasible) {
       expect(option.source).toBe("TON");
       expect(option.txs).toHaveLength(1);
-      expect(option.breakdown.gas).toBe(50_000_000n);
+      // TON_DIRECT_GAS = 0n by default — `value` collapses to totalCost.
+      expect(option.breakdown.gas).toBe(0n);
+      expect(option.breakdown.spend).toBe(totalCost);
     }
     expect(lockedInRate).toBeNull();
   });

@@ -4,6 +4,36 @@ All notable changes to `@toncast/tx-sdk` will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.1]
+
+### Changed
+
+- **`TON_DIRECT_GAS` default is now `0n`** (was `50_000_000n` / 0.05 TON).
+  `PARI_EXECUTION_FEE` (`0.1 TON × N entries`, already inside `totalCost`)
+  fully covers Pari's forward fees, storage, and compute gas; no extra
+  surplus needs to be attached to the message `value`. Practical effect:
+  - For TON-funded bets, the wallet's "Sent" amount now matches the UI's
+    "Total" line exactly (was `totalCost + 0.05 TON`, surplus refunded
+    later via a separate tx).
+  - `PricedCoin.gasReserve` for TON sources is now `0n`.
+  - `availableForBet(tonCoin, walletReserve)` now returns
+    `balance − walletReserve` (was `balance − walletReserve − 0.05 TON`),
+    so UI sliders sized via this helper can use up to ~0.05 TON more
+    of the user's balance for the same wallet reserve.
+- Override per-call still available via `BuildTonBetTxParams.tonDirectGas`
+  for callers who have a verified mainnet reason to attach a surplus.
+- Documentation in `constants.ts`, `builders/ton.ts`, `pricing.ts`, and
+  `types.ts` updated to reflect the new default.
+
+### Notes
+
+- Jetton-funded paths are unaffected (`TON_DIRECT_GAS` is referenced only
+  in TON-direct code paths). `DEX_CUSTOM_PAYLOAD_FORWARD_GAS` (0.1 TON
+  for the proxy hop) and the `*_HOP_JETTON_GAS_ESTIMATE` reserves remain
+  unchanged.
+- Test fixtures updated: `tonPriced(amount)` / `priceTon(amount)`
+  helpers now use `gasReserve: 0n` and `viable: amount > walletReserve`.
+
 ## [0.1.0] — initial release
 
 First public release of `@toncast/tx-sdk` — a TypeScript SDK that builds

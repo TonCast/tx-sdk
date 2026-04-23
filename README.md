@@ -330,7 +330,7 @@ The rules:
 
 | Coin                      | Viable iff                                      | `gasReserve`  |
 | ------------------------- | ----------------------------------------------- | ------------- |
-| TON                       | `amount > walletReserve + TON_DIRECT_GAS`       | `0.05 TON`    |
+| TON                       | `amount > walletReserve + TON_DIRECT_GAS`       | `0n` (default — `PARI_EXECUTION_FEE` covers Pari-side gas) |
 | Jetton (direct route)     | `tonEquivalent > DIRECT_HOP_JETTON_GAS_ESTIMATE` | `0.3 TON`    |
 | Jetton (2-hop route)      | `tonEquivalent > CROSS_HOP_JETTON_GAS_ESTIMATE`  | `0.6 TON`    |
 | Jetton (no route)         | never                                           | `0n`          |
@@ -343,7 +343,8 @@ Import the helper and use it for both UI aggregates and SDK-internal feasibility
 import { availableForBet, DEFAULT_WALLET_RESERVE } from "@toncast/tx-sdk";
 
 const capacity = availableForBet(coin, DEFAULT_WALLET_RESERVE);
-//   TON:    amount − walletReserve − TON_DIRECT_GAS       (0 if negative)
+//   TON:    amount − walletReserve − TON_DIRECT_GAS       (default `TON_DIRECT_GAS = 0n`,
+//                                                          so collapses to amount − walletReserve)
 //   Jetton: tonEquivalent if viable, else 0 (no gas subtraction!)
 
 const totalCapacity = priced
@@ -728,7 +729,7 @@ All configuration constants are re-exported from `@toncast/tx-sdk`:
 | `TONCAST_PROXY_ADDRESS`              | mainnet proxy      | Unwraps jetton payloads to Pari             |
 | `WIN_AMOUNT_PER_TICKET`              | `100_000_000n`     | 0.1 TON per winning ticket                  |
 | `PARI_EXECUTION_FEE`                 | `100_000_000n`     | 0.1 TON per bets-map entry                  |
-| `TON_DIRECT_GAS`                     | `50_000_000n`      | TON-direct bet gas buffer                   |
+| `TON_DIRECT_GAS`                     | `0n`               | TON-direct extra surplus on `value` (default off — `PARI_EXECUTION_FEE` covers Pari-side gas) |
 | `DEX_CUSTOM_PAYLOAD_FORWARD_GAS`     | `100_000_000n`     | TON buffer on jetton-swap payload           |
 | `DIRECT_HOP_JETTON_GAS_ESTIMATE`     | `300_000_000n`     | Direct jetton swap gas reserve              |
 | `CROSS_HOP_JETTON_GAS_ESTIMATE`      | `600_000_000n`     | 2-hop jetton swap gas reserve               |

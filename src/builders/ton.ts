@@ -20,7 +20,8 @@ export type BuildTonBetTxParams = {
   referralPct: number;
   /**
    * TON added to `value` on top of `totalCost`. Defaults to
-   * {@link TON_DIRECT_GAS} (0.05 TON, verified on mainnet).
+   * {@link TON_DIRECT_GAS} (`0n`). `PARI_EXECUTION_FEE` (`0.1 TON × N`)
+   * is already inside `totalCost` and covers Pari-side gas.
    */
   tonDirectGas?: bigint;
 };
@@ -34,9 +35,14 @@ export type BuildTonBetTxParams = {
  * body  = BatchPlaceBetsForWithRef(...)     // opcode 0xaabbccf0
  * ```
  *
+ * With the default `tonDirectGas = TON_DIRECT_GAS = 0n`,
+ * `value === totalCost` — what the wallet shows as "Sent" matches the
+ * UI's "Total" line item-for-item. `PARI_EXECUTION_FEE` baked into
+ * `totalCost` already covers Pari-side gas; no extra surplus / refund
+ * round-trip is needed.
+ *
  * No STON.fi swap, no proxy — the Pari contract receives the message
- * directly. Relies on Pari's internal refund logic when `msgValue` is
- * insufficient (see `has_refund` assumption in the plan).
+ * directly.
  */
 export function buildTonBetTx(params: BuildTonBetTxParams): TxParams {
   validateBetParams({

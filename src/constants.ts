@@ -47,12 +47,18 @@ export const CONTRACT_RESERVE = 10_000_000n;
 // ─── Gas defaults ───────────────────────────────────────────────────────────
 
 /**
- * TON gas buffer added to TON-direct `value` on top of totalCost.
- * Verified on mainnet: 0.05 TON is sufficient for the Pari `receive`
- * handler to process a `BatchPlaceBetsForWithRef` message and emit its
- * per-entry forward messages. Excess is refunded by Pari.
+ * Extra TON to attach on top of `totalCost` when building a TON-direct
+ * `value`. Defaults to **`0`** — `PARI_EXECUTION_FEE` (`0.1 TON × N entries`)
+ * is already inside `totalCost` and covers Pari's forward fees, storage,
+ * and compute gas with room to spare. Adding more on top is wasteful
+ * (the surplus comes back as a refund tx, but it spends an extra hop
+ * and shows the user a higher "Sent" number than the bet they placed).
+ *
+ * Override per-call via `BuildTonBetTxParams.tonDirectGas` only if you
+ * have a verified mainnet reason to (e.g. an upcoming Pari upgrade
+ * that raises forward-fee economics).
  */
-export const TON_DIRECT_GAS = 50_000_000n; // 0.05 TON
+export const TON_DIRECT_GAS = 0n;
 
 /**
  * Fixed TON amount delivered alongside the payload on the jetton-swap route.

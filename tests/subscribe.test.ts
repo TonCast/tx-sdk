@@ -27,7 +27,8 @@ function tonPriced(amount: bigint): PricedCoin {
     amount,
     tonEquivalent: amount,
     tonEquivalentExpected: amount,
-    gasReserve: 50_000_000n,
+    // TON_DIRECT_GAS = 0n by default: see src/constants.ts.
+    gasReserve: 0n,
     route: "direct",
     viable: true,
   };

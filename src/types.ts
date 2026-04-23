@@ -98,7 +98,8 @@ export type PricedCoin = {
   tonEquivalentExpected: bigint;
   /**
    * TON the user must hold on their wallet for this swap to go through.
-   * For TON: {@link TON_DIRECT_GAS} (0.05 TON) — gas buffer for Pari.
+   * For TON: {@link TON_DIRECT_GAS} (default `0n` — `PARI_EXECUTION_FEE`
+   * already covers Pari-side gas, no extra buffer is needed).
    * For direct jetton swap: {@link DIRECT_HOP_JETTON_GAS_ESTIMATE} (0.3 TON).
    * For 2-hop jetton swap: {@link CROSS_HOP_JETTON_GAS_ESTIMATE} (0.6 TON).
    * For `route === null`: `0n` (coin is unusable anyway).

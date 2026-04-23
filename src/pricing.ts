@@ -19,19 +19,21 @@ import { sameAddress } from "./utils/address.js";
  *
  * Handles the TON/jetton asymmetry in one place:
  *
- * - **TON**: subtracts `walletReserve` + `gasReserve` (`TON_DIRECT_GAS`,
- *   0.05 TON) because both the bet's `totalCost` and the Pari-side gas
- *   are billed to the same wallet balance.
+ * - **TON**: subtracts `walletReserve` + `gasReserve` (= {@link TON_DIRECT_GAS},
+ *   default `0n`). With the default the only deduction is `walletReserve`
+ *   itself — `PARI_EXECUTION_FEE` already covers Pari's processing gas
+ *   from inside `totalCost`, so no extra buffer is needed.
  * - **Jetton**: equals `tonEquivalent` (the pessimistic `minAskUnits` of
  *   the full swap). Swap gas is billed to the user's TON wallet
  *   separately, NOT to this jetton, so it must NOT be deducted here.
  *
  * Returns `0n` when `!viable`, a non-viable coin has nothing to offer.
  *
- * Use this as the unified capacity check:
+ * Use this as the unified capacity check, **and** as the slider max for
+ * UI bet sizing — guaranteed to fit alongside `walletReserve`:
  *
  * ```ts
- * if (availableForBet(picked, walletReserve) < totalCost) ...
+ * const maxBudget = availableForBet(picked, walletReserve);
  * ```
  *
  * UI layers that want an optimistic "you will get ~X TON" label should
@@ -88,7 +90,8 @@ const defaultCaller: NetworkCaller = async (fn) => fn();
  * Value each coin in TON and flag which are viable bet sources.
  *
  * - TON is valued at `amount − walletReserve − TON_DIRECT_GAS`.
- *   `viable` iff the result is strictly positive.
+ *   With the default `TON_DIRECT_GAS = 0n` this collapses to
+ *   `amount − walletReserve`. `viable` iff the result is strictly positive.
  * - Jetton: `discoverRoute` finds a direct or 2-hop path, then the
  *   forward simulation's `minAskUnits` is used as the pessimistic TON
  *   delivery. `gasReserve` is 0.3 TON (direct) / 0.6 TON (cross).

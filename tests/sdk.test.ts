@@ -30,9 +30,11 @@ function tonPriced(amount: bigint): PricedCoin {
     amount,
     tonEquivalent: amount,
     tonEquivalentExpected: amount,
-    gasReserve: 50_000_000n,
+    // TON_DIRECT_GAS = 0n by default; PARI_EXECUTION_FEE inside
+    // totalCost covers Pari-side processing gas already.
+    gasReserve: 0n,
     route: "direct",
-    viable: amount > 100_000_000n,
+    viable: amount > 50_000_000n,
   };
 }
 
@@ -177,7 +179,9 @@ describe("ToncastTxSdk.priceCoins", () => {
     expect(priced).toHaveLength(1);
     expect(priced[0]?.address).toBe(TON_ADDRESS);
     expect(priced[0]?.viable).toBe(true);
-    expect(priced[0]?.gasReserve).toBe(50_000_000n);
+    // TON_DIRECT_GAS = 0n: PARI_EXECUTION_FEE inside totalCost already
+    // covers Pari-side gas, no extra surplus is attached.
+    expect(priced[0]?.gasReserve).toBe(0n);
   });
 
   it("jetton without tonClient → non-viable with reason", async () => {
