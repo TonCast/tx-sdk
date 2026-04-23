@@ -49,9 +49,11 @@ for (const c of priced) {
         `expected=${Number(c.tonEquivalentExpected) / 1e9} TON, ` +
         `gas=${Number(c.gasReserve) / 1e9} TON, ` +
         `route=${
-          typeof c.route === "object"
-            ? `cross via ${c.route.intermediate.slice(0, 6)}`
-            : c.route
+          c.route === null
+            ? "n/a"
+            : typeof c.route === "object"
+              ? `cross via ${c.route.intermediate.slice(0, 6)}`
+              : c.route
         }`,
     );
   } else {
