@@ -214,12 +214,17 @@ async function priceOne(args: {
         ? DIRECT_HOP_JETTON_GAS_ESTIMATE
         : CROSS_HOP_JETTON_GAS_ESTIMATE;
 
-    // STON.fi's per-pool slippage recommendation. For cross-hop, take
-    // the WORST (= larger) of the two legs — that hop dominates the
-    // on-chain failure risk. Falls back to the user-provided slippage
-    // when STON.fi does not return a recommendation (some pools omit
-    // the field or return "0" / empty).
-    const recommendedSlippage = pickRecommendedSlippage(route);
+    // STON.fi's per-pool slippage recommendation, normalised to the
+    // route-TOTAL slippage scale (= the user-facing budget on the
+    // final TON delivery, not per leg). For direct = leg1's recommendation
+    // unchanged; for cross-hop = the two leg recommendations COMPOSED
+    // (`1 − (1 − r1)(1 − r2)`) — that's the route-total budget needed
+    // to honour both per-leg recommendations after the per-leg gross-up
+    // applied internally by `simulateReverseCrossToTon` / `discoverRoute`.
+    // Falls back to the user-provided slippage when STON.fi does not
+    // return a recommendation (some pools omit the field or return
+    // "0" / empty).
+    const recommendedSlippage = pickRecommendedRouteSlippage(route);
     const userSlippage = slippage;
     // Effective slippage = min(recommended, user-set max). The user
     // set their max as a hard ceiling; STON.fi can only TIGHTEN it,
@@ -228,30 +233,43 @@ async function priceOne(args: {
       ? minSlippage(recommendedSlippage, userSlippage)
       : userSlippage;
 
-    // `tonEquivalent` is the floor the planner / confirmQuote enforce
-    // for this coin. We pin it to the effective slippage:
-    //   - if recommended ≤ user: use STON.fi's recommendedMinAskUnits
-    //     directly when it lines up (final leg only), otherwise
-    //     compute locally from the expected output;
-    //   - if recommended > user (STON.fi wants more headroom than the
-    //     user allows): clamp at user's max via askUnits × (1 − user).
-    const recommendedMinAskUnits = pickRecommendedMinAskUnits(route);
-    const tonEquivalent = computeFloorFromExpected(
-      tonEquivalentExpected,
-      effectiveSlippage,
-      // Use STON.fi-supplied floor when it matches the chosen slippage
-      // bucket (avoids a redundant local approximation on its own
-      // computation). Only valid for direct route — for cross we
-      // compose both legs locally below.
-      route.type === "direct" &&
-        recommendedSlippage !== undefined &&
-        sameSlippage(recommendedSlippage, effectiveSlippage)
-        ? recommendedMinAskUnits
-        : minAskUnitsAtUserSlippage &&
-            sameSlippage(userSlippage, effectiveSlippage)
-          ? minAskUnitsAtUserSlippage
-          : undefined,
-    );
+    // `tonEquivalent` is the route-total floor the planner / confirmQuote
+    // enforce for this coin: how much TON the full balance is GUARANTEED
+    // to deliver assuming an adverse movement up to `effectiveSlippage`
+    // anywhere along the route. Always computed from `expected × (1 −
+    // routeTotal)`; we deliberately do NOT reuse the simulator's
+    // `minAskUnits` for cross-hop because under per-leg slippage that
+    // value is `ask × (1 − perLeg)` — a per-leg floor, not a route-total
+    // one. For direct (legCount = 1) per-leg ≡ route-total, so the
+    // simulator's `minAskUnits` is reused as a precomputed shortcut when
+    // the slippage buckets match.
+    // `recommendedMinAskUnits` exposed on `PricedCoin` is the floor at
+    // STON.fi's recommendedSlippage, route-total. For direct we reuse
+    // the simulator's value as-is (route-total ≡ per-leg). For cross we
+    // compose it locally from `tonEquivalentExpected × (1 − routeTotalRec)`
+    // because the simulator's per-leg `recommendedMinAskUnits` is sized
+    // for the wrong slippage scale.
+    const recommendedMinAskUnitsDirect = pickRecommendedMinAskUnits(route);
+    const recommendedMinAskUnits =
+      route.type === "direct"
+        ? recommendedMinAskUnitsDirect
+        : recommendedSlippage !== undefined
+          ? computeFloorFromExpected(tonEquivalentExpected, recommendedSlippage)
+          : undefined;
+    const tonEquivalent =
+      route.type === "direct"
+        ? computeFloorFromExpected(
+            tonEquivalentExpected,
+            effectiveSlippage,
+            recommendedSlippage !== undefined &&
+              sameSlippage(recommendedSlippage, effectiveSlippage)
+              ? recommendedMinAskUnitsDirect
+              : minAskUnitsAtUserSlippage &&
+                  sameSlippage(userSlippage, effectiveSlippage)
+                ? minAskUnitsAtUserSlippage
+                : undefined,
+          )
+        : computeFloorFromExpected(tonEquivalentExpected, effectiveSlippage);
 
     // `viable` filters dust jettons: if the swap delivers less TON than
     // it costs in wallet gas, using this coin is net-destructive. Note
@@ -298,16 +316,26 @@ async function priceOne(args: {
 // ─── slippage helpers ──────────────────────────────────────────────────────
 
 /**
- * Extract STON.fi's per-pool slippage recommendation.
+ * Extract STON.fi's slippage recommendation for the route, expressed
+ * as a route-TOTAL slippage (= user-facing budget on the final TON
+ * delivery).
  *
- * For direct routes — leg1's `recommendedSlippageTolerance`.
- * For cross-hop — the LARGER of the two leg recommendations: that
- * leg dominates the on-chain failure risk, so the conservative pick
- * is the one closer to the user-set ceiling. Returns `undefined` if
- * neither leg has a usable value (some pools omit the field or
- * return `"0"` / empty string).
+ * For direct routes — leg1's `recommendedSlippageTolerance` directly
+ * (route-total ≡ per-leg when there is one leg).
+ *
+ * For cross-hop — the two per-pool recommendations composed via
+ * `1 − (1 − r1)(1 − r2)`. That is the smallest route-total budget
+ * which, after being split back into per-leg via
+ * {@link perLegSlippage}, still satisfies both pools' independent
+ * recommendations. If only one leg returns a usable value, we
+ * conservatively assume the missing leg matches it (treat as r1=r2)
+ * and compose — this avoids silently dropping the recommendation
+ * for one leg only because the other pool omitted the field.
+ *
+ * Returns `undefined` if NEITHER leg has a usable value (some pools
+ * omit the field or return `"0"` / empty string).
  */
-function pickRecommendedSlippage(route: {
+function pickRecommendedRouteSlippage(route: {
   type: "direct" | "cross";
   leg1: { recommendedSlippageTolerance?: string | null };
   leg2?: { recommendedSlippageTolerance?: string | null };
@@ -315,23 +343,34 @@ function pickRecommendedSlippage(route: {
   const leg1 = parseSlippage(route.leg1.recommendedSlippageTolerance);
   if (route.type === "direct") return leg1;
   const leg2 = parseSlippage(route.leg2?.recommendedSlippageTolerance);
-  if (leg1 === undefined) return leg2;
-  if (leg2 === undefined) return leg1;
-  return numericSlippage(leg1) >= numericSlippage(leg2) ? leg1 : leg2;
+  if (leg1 === undefined && leg2 === undefined) return undefined;
+  // Compose into route-total. Single-leg-known case: take the worse
+  // (larger) leg as a stand-in for both; that's the conservative
+  // direction (over-estimates required headroom slightly, never
+  // under-estimates).
+  const a = leg1 ?? leg2;
+  const b = leg2 ?? leg1;
+  if (a === undefined || b === undefined) return undefined;
+  const composed = 1 - (1 - numericSlippage(a)) * (1 - numericSlippage(b));
+  return Number(composed.toFixed(9)).toString();
 }
 
 /**
- * Mirror {@link pickRecommendedSlippage} but for the precomputed floor
- * value. Only meaningful for direct routes (cross-hop floors compose
- * non-trivially across legs and are recomputed locally instead).
+ * Mirror {@link pickRecommendedRouteSlippage} but for the precomputed
+ * floor value. Only meaningful for direct routes — for cross-hop the
+ * simulator returns `recommendedMinAskUnits` per-leg (= `ask × (1 −
+ * legRec)`), which can NOT be reused as a route-total floor without
+ * composition. Returning `undefined` for cross routes signals the
+ * caller to recompute the floor locally as
+ * `tonEquivalentExpected × (1 − routeTotalRec)` instead.
  */
 function pickRecommendedMinAskUnits(route: {
   type: "direct" | "cross";
   leg1: { recommendedMinAskUnits?: string | null };
   leg2?: { recommendedMinAskUnits?: string | null };
 }): bigint | undefined {
-  const finalLeg = route.type === "direct" ? route.leg1 : route.leg2;
-  const raw = finalLeg?.recommendedMinAskUnits;
+  if (route.type !== "direct") return undefined;
+  const raw = route.leg1.recommendedMinAskUnits;
   if (!raw) return undefined;
   try {
     const v = BigInt(raw);

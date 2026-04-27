@@ -220,29 +220,44 @@ describe("createRatesClient", () => {
     expect(BigInt(sim.minAskUnits)).toBeGreaterThanOrEqual(totalCost);
   });
 
-  it("simulateReverseCrossToTon grosses up BOTH legs", async () => {
-    // leg2 ask must bump so leg2.minAskUnits ≥ totalCost.
-    // leg1 ask must bump so leg1.minAskUnits ≥ leg2.offerUnits — otherwise
-    // leg1 under-delivery makes leg2 revert and refund the intermediate
-    // jetton to the user.
+  it("simulateReverseCrossToTon grosses up each leg by per-leg slippage", async () => {
+    // Variant B (route-total slippage): each of the two legs is grossed
+    // up by the per-leg budget `1 − √(1 − userSlip)` so the COMPOSED
+    // worst-case across the route equals the user's stated slippage.
+    //
+    // Invariants this test pins:
+    //   1. Both leg ask amounts are bumped above their target (so the
+    //      simulator's per-leg minAskUnits stays ≥ the target it covers).
+    //   2. The TOTAL gross-up factor (offerUnits / fair offer at no
+    //      slippage) is ≈ 1/(1 − userSlip) — NOT 1/(1 − userSlip)² as it
+    //      was under the old per-leg-as-user-slippage semantics.
     const INTERMEDIATE = "EQBynBO23ywHy_CgarY9NK9FTz0yDsG82PtcbSTOgVZIxEQI";
     const captured: Array<{
       offerAddress: string;
       askAddress: string;
       askUnits: string;
+      slippageTolerance: string;
     }> = [];
     const simulateReverseSwap = vi.fn(async (args: unknown) => {
       const a = args as {
         offerAddress: string;
         askAddress: string;
         askUnits: string;
+        slippageTolerance: string;
       };
       captured.push({
         offerAddress: a.offerAddress,
         askAddress: a.askAddress,
         askUnits: a.askUnits,
+        slippageTolerance: a.slippageTolerance,
       });
-      const minAskUnits = ((BigInt(a.askUnits) * 9_500n) / 10_000n).toString();
+      // Mock simulator honours the slippageTolerance it was passed —
+      // mirrors STON.fi behaviour and is the right shape for asserting
+      // "leg minAskUnits stays ≥ its per-leg target".
+      const SCALE = 1_000_000_000n;
+      const slip = Number(a.slippageTolerance);
+      const keep = SCALE - BigInt(Math.round(slip * Number(SCALE)));
+      const minAskUnits = ((BigInt(a.askUnits) * keep) / SCALE).toString();
       // Stub a simple 1:1 offer/ask ratio for simplicity.
       return buildSimulation({
         offerAddress: a.offerAddress,
@@ -266,28 +281,51 @@ describe("createRatesClient", () => {
     });
 
     const totalCost = 350_000_000n;
+    const userSlip = 0.05;
     const result = await rates.simulateReverseCrossToTon({
       offerAddress: OFFER,
       intermediate: INTERMEDIATE,
       targetTonUnits: totalCost,
-      slippage: "0.05",
+      slippage: userSlip.toString(),
     });
 
     expect(captured).toHaveLength(2);
-    // First call: leg2 (intermediate → TON).
+    // First call: leg2 (intermediate → TON). Per-leg slippage = 1 − √(1 − userSlip).
     expect(captured[0]!.askAddress).toBe(TON_ADDRESS);
+    const expectedPerLeg = 1 - Math.sqrt(1 - userSlip);
+    expect(Number(captured[0]!.slippageTolerance)).toBeCloseTo(
+      expectedPerLeg,
+      9,
+    );
     expect(BigInt(captured[0]!.askUnits)).toBeGreaterThan(totalCost);
-    // Second call: leg1 (offer → intermediate). Its askUnits must exceed
-    // leg2.offerUnits to cover leg2's slippage envelope as well.
+    // Second call: leg1 (offer → intermediate). Same per-leg slippage,
+    // and its askUnits must exceed leg2.offerUnits to cover leg2's
+    // slippage envelope.
     expect(captured[1]!.offerAddress).toBe(OFFER);
+    expect(Number(captured[1]!.slippageTolerance)).toBeCloseTo(
+      expectedPerLeg,
+      9,
+    );
     expect(BigInt(captured[1]!.askUnits)).toBeGreaterThan(
       BigInt(result.leg2.offerUnits),
     );
-    // Both enforcement floors stay safe:
+    // Per-leg enforcement floors are safe under their own per-leg
+    // slippage (mock honours the slippageTolerance arg, so this matches
+    // real STON.fi behaviour):
     expect(BigInt(result.leg2.minAskUnits)).toBeGreaterThanOrEqual(totalCost);
     expect(BigInt(result.leg1.minAskUnits)).toBeGreaterThanOrEqual(
       BigInt(result.leg2.offerUnits),
     );
+    // Total gross-up regression: with 1:1 mock rates, leg1.offerUnits
+    // is the TCAST equivalent the user actually pays for `totalCost`
+    // worth of TON delivery. Under Variant B that's totalCost ×
+    // 1/(1 − userSlip) ≈ 1.0526× — NOT the old 1.108× from compounding
+    // 5% slippage on each leg independently. Allow ±1% wiggle for ceil
+    // rounding in two grossUpForSlippage calls.
+    const fairOffer = Number(totalCost);
+    const actualOffer = Number(BigInt(result.leg1.offerUnits));
+    expect(actualOffer / fairOffer).toBeGreaterThan(1 / (1 - userSlip) - 0.01);
+    expect(actualOffer / fairOffer).toBeLessThan(1 / (1 - userSlip) + 0.01);
   });
 
   it("forward and reverse use separate cache slots", async () => {

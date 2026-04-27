@@ -4,6 +4,85 @@ All notable changes to `@toncast/tx-sdk` will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.3]
+
+### Fixed
+
+- **Cross-hop swaps no longer compound slippage per leg.** The user-set
+  `slippage` is now treated as a route-TOTAL budget (matching STON.fi /
+  Omniston UI semantics), and the SDK splits it into a tighter per-leg
+  slippage internally — `perLeg = 1 − √(1 − slippage)` — so the composed
+  worst-case across both legs equals the user's stated slippage.
+  - **Before**: a 5 % slippage on a 2-hop route (e.g. `TCAST → USDT →
+    TON`) was applied as 5 % per leg, grossing the offer jetton up by
+    `1/(1 − 0.05)² ≈ 1.108×`. Users observed wallets requesting ~5 %
+    more jetton than the planner's linear estimate showed (mainnet:
+    UI quoted 26.8 TCAST; wallet asked for 28.21 TCAST for the same
+    bet).
+  - **After**: total gross-up across the route is `1/(1 − slippage) ≈
+    1.053×`, exactly the same factor as a direct swap at the same
+    slippage. The wallet's "Sent" amount now matches the planner's
+    linear estimate within ±2 % (rounding from two `grossUpForSlippage`
+    ceil ops).
+- **`PricedCoin.tonEquivalent` for cross-hop sources now reflects the
+  TRUE route-total worst-case delivery** (`expected × (1 − slippage)`),
+  not the per-leg floor STON.fi returns on `leg2.minAskUnits`. UI
+  sliders bound by `tonEquivalent` thus expose ~5 % less max-bet
+  capacity than 0.1.2 — but every TON inside the new range is now
+  guaranteed to confirm without the wallet asking for unexpectedly
+  more jetton.
+
+### Changed
+
+- New helpers in `src/utils/slippage.ts`:
+  - `perLegSlippage(total, legCount)` — splits a route-total budget
+    into per-leg (legCount=1 is a no-op for direct routes).
+  - `combineLegSlippage(perLeg, legCount)` — inverse: composes per-leg
+    recommendations into route-total for like-for-like comparison
+    against the user's slippage.
+- `PricedCoin.recommendedSlippage` for cross-hop is now the route-total
+  composition of both per-pool recommendations
+  (`1 − (1 − r1)(1 − r2)`), not the larger of the two leg values. It
+  can be compared directly against `userSlippage`.
+- `PricedCoin.recommendedMinAskUnits` for cross-hop is recomputed
+  locally from the route-total recommendation
+  (`tonEquivalentExpected × (1 − recommendedSlippage)`), not taken
+  from the simulator's per-leg `recommendedMinAskUnits` (which would
+  be sized for the wrong slippage scale).
+- `simulateReverseCrossToTon` (`src/rates.ts`) and `discoverRoute`'s
+  cross-hop simulator calls (`src/routing/discover.ts`) now pass
+  `perLegSlippage(slippage, 2)` to STON.fi instead of the user's
+  route-total slippage. Direct routes are unchanged.
+- Field-level JSDoc in `src/types.ts` updated to make the route-total
+  semantics explicit on `recommendedSlippage` / `effectiveSlippage`.
+
+### Added
+
+- New regression tests:
+  - `tests/utils/slippage.test.ts` — round-trip and edge cases for
+    `perLegSlippage` / `combineLegSlippage`.
+  - `tests/pricing.test.ts` — pins the linear-estimate ↔ confirm-offer
+    ratio at ≈ 1.0 for cross-hop (was ≈ 1.05 under the old code).
+  - `tests/sdk.test.ts` — end-to-end `quote → confirmQuote` smoke
+    tests for cross-hop with all three modes (`fixed`, `limit`,
+    `market`), plus a "max-capacity bet still confirms" guard.
+
+### Notes
+
+- Direct (1-hop) routes are mathematically unchanged: `perLegSlippage(s, 1)`
+  is the identity, so direct paths emit the same `tonEquivalent`,
+  `offerUnits`, and `minAskAmount` as 0.1.2.
+- TON-funded paths are unaffected.
+- This is a *behavioural* breaking change for UI consumers reading
+  `tonEquivalent` for cross-hop sources — the value will be ~5 %
+  smaller for the same balance and slippage than in 0.1.2. UI
+  sliders bound by `tonEquivalent` will automatically respect the
+  new ceiling and stop offering bets that the wallet would have
+  silently re-priced upward.
+- Mainnet smoke-test on the cross-hop path is recommended before any
+  production deploy. See `examples/bet-on-behalf.ts` for a worked
+  example.
+
 ## [0.1.2]
 
 ### Changed

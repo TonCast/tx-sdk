@@ -759,6 +759,358 @@ describe("ToncastTxSdk allowInsufficientBalance (preview mode)", () => {
   });
 });
 
+// ─── Cross-hop end-to-end smoke tests ──────────────────────────────────────
+//
+// Reproduce the mainnet TCAST → USDT → TON path for each of fixed / limit /
+// market modes and verify quote → confirmQuote produces a swap whose offer
+// jetton amount tracks the planner's linear estimate within ±2 %.
+//
+// Why these exist:
+//   - Variant B (route-total slippage) was a structural change to the
+//     cross-hop slippage math. The pricing-/rates-level regression test
+//     covers the math in isolation; these tests pin the contract for the
+//     full SDK surface so a future "let's gross up per leg again" change
+//     surfaces an obvious failure.
+//   - All three strategies feed the same planner / confirmQuote pipeline
+//     but with different `bets[]` shapes — covering each guards against
+//     accidental coupling between strategy logic and slippage handling.
+describe("ToncastTxSdk cross-hop quote → confirmQuote", () => {
+  // Mock STON.fi pool: 1 jetton ≈ 50 TON via USDT intermediate, 1:1 USDT
+  // legs. honourSlippage replays the slippageTolerance the simulator was
+  // called with, mirroring real STON.fi behaviour (mock at the rates
+  // layer in pricing.test.ts already covers the same shape).
+  const COMMUNITY_X = "EQBynBO23ywHy_CgarY9NK9FTz0yDsG82PtcbSTOgVZIxEQI";
+  const SCALE = 1_000_000_000n;
+
+  function honourSlippage(askUnits: string, slip: string): string {
+    const keep = SCALE - BigInt(Math.round(Number(slip) * Number(SCALE)));
+    return ((BigInt(askUnits) * keep) / SCALE).toString();
+  }
+
+  function makeCrossHopApiClient() {
+    const usdtPerJetton = 5_000_000n; // leg1: 100M jetton → 5M USDT
+    // Pool sized so 100M jetton ≈ 50 TON — plenty of headroom for fixed
+    // (5.7 TON) / limit (~17 TON) / market (capacity-fraction) bets so
+    // capacity isn't what we're testing here.
+    const tonPerUsdt = 10_000n; // leg2: 5M USDT → 5e10 TON
+    const apiClient = createMockApiClient({
+      pairs: [
+        [COMMUNITY_X, USDT],
+        [USDT, TON_ADDRESS],
+      ],
+      pools: { [`${COMMUNITY_X}↔${USDT}`]: [{ lpTotalSupplyUsd: "1000000" }] },
+    });
+
+    (
+      apiClient as unknown as { simulateSwap: typeof apiClient.simulateSwap }
+    ).simulateSwap = vi.fn(async (args: unknown) => {
+      const a = args as {
+        offerAddress: string;
+        askAddress: string;
+        offerUnits: string;
+        slippageTolerance: string;
+      };
+      let askUnits: string;
+      if (a.offerAddress === COMMUNITY_X && a.askAddress === USDT) {
+        askUnits = (
+          (BigInt(a.offerUnits) * usdtPerJetton) /
+          100_000_000n
+        ).toString();
+      } else if (a.offerAddress === USDT && a.askAddress === TON_ADDRESS) {
+        askUnits = (BigInt(a.offerUnits) * tonPerUsdt).toString();
+      } else {
+        throw new Error(
+          `unexpected forward sim: ${a.offerAddress} → ${a.askAddress}`,
+        );
+      }
+      return buildSimulation({
+        offerAddress: a.offerAddress,
+        askAddress: a.askAddress,
+        offerUnits: a.offerUnits,
+        askUnits,
+        minAskUnits: honourSlippage(askUnits, a.slippageTolerance),
+        priceImpact: "0.001",
+      });
+    }) as unknown as typeof apiClient.simulateSwap;
+
+    (
+      apiClient as unknown as {
+        simulateReverseSwap: import("@ston-fi/api").StonApiClient["simulateReverseSwap"];
+      }
+    ).simulateReverseSwap = vi.fn(async (args: unknown) => {
+      const a = args as {
+        offerAddress: string;
+        askAddress: string;
+        askUnits: string;
+        slippageTolerance: string;
+      };
+      let offerUnits: string;
+      if (a.offerAddress === USDT && a.askAddress === TON_ADDRESS) {
+        offerUnits = (BigInt(a.askUnits) / tonPerUsdt).toString();
+      } else if (a.offerAddress === COMMUNITY_X && a.askAddress === USDT) {
+        offerUnits = (
+          (BigInt(a.askUnits) * 100_000_000n) /
+          usdtPerJetton
+        ).toString();
+      } else {
+        throw new Error(
+          `unexpected reverse sim: ${a.offerAddress} → ${a.askAddress}`,
+        );
+      }
+      return buildSimulation({
+        offerAddress: a.offerAddress,
+        askAddress: a.askAddress,
+        offerUnits,
+        askUnits: a.askUnits,
+        minAskUnits: honourSlippage(a.askUnits, a.slippageTolerance),
+        priceImpact: "0.001",
+      });
+    }) as unknown as import("@ston-fi/api").StonApiClient["simulateReverseSwap"];
+    return apiClient;
+  }
+
+  function expectLinearEstimateMatchesConfirm(args: {
+    pricedJetton: PricedCoin;
+    totalCost: bigint;
+    confirmOfferUnits: bigint;
+  }) {
+    const { pricedJetton, totalCost, confirmOfferUnits } = args;
+    // Mirror planner.ts::estimatedOfferUnits exactly.
+    const linear =
+      (pricedJetton.amount * totalCost + pricedJetton.tonEquivalent - 1n) /
+      pricedJetton.tonEquivalent;
+    const ratio = Number(confirmOfferUnits) / Number(linear);
+    // Old per-leg-as-user-slippage code put this ratio at ~1.05 for
+    // cross-hop. With Variant B it must sit inside a couple of percent —
+    // the only remaining drift comes from grossUp ceil rounding plus
+    // tonEquivalent's pessimistic floor on the *full* balance.
+    expect(ratio).toBeGreaterThan(0.98);
+    expect(ratio).toBeLessThan(1.02);
+  }
+
+  it("quoteFixedBet → confirmQuote: cross-hop offer matches linear estimate", async () => {
+    const apiClient = makeCrossHopApiClient();
+    const sdk = new ToncastTxSdk({
+      apiClient,
+      tonClient: makeFakeTonClient(),
+      rateLimits: {
+        tonClient: { minIntervalMs: 0 },
+        stonApi: { minIntervalMs: 0 },
+      },
+      maxRetries: 0,
+    });
+
+    // Use SDK.priceCoins so tonEquivalent is whatever the new pricing
+    // logic actually emits — no hand-crafted values that could mask
+    // regressions.
+    const priced = await sdk.priceCoins({
+      availableCoins: [
+        { address: TON_ADDRESS, amount: 2_000_000_000n },
+        { address: COMMUNITY_X, amount: 100_000_000n },
+      ],
+    });
+    const jetton = priced.find((c) => c.address === COMMUNITY_X);
+    expect(jetton?.viable).toBe(true);
+    expect(jetton?.route).toEqual({ intermediate: USDT });
+
+    const quote = await sdk.quoteFixedBet({
+      pariAddress: PARI,
+      beneficiary: BENEFICIARY,
+      isYes: true,
+      yesOdds: 56,
+      ticketsCount: 100,
+      referral: null,
+      referralPct: 0,
+      source: COMMUNITY_X,
+      pricedCoins: priced,
+    });
+    expect(quote.option.feasible).toBe(true);
+
+    const confirmed = await sdk.confirmQuote(quote, {
+      pariAddress: PARI,
+      beneficiary: BENEFICIARY,
+      referral: null,
+      referralPct: 0,
+    });
+    expect(confirmed.option.feasible).toBe(true);
+    if (!confirmed.option.feasible) return;
+    expect(confirmed.option.estimated).toBe(false);
+    expect(confirmed.option.txs).toHaveLength(1);
+
+    expectLinearEstimateMatchesConfirm({
+      pricedJetton: jetton!,
+      totalCost: quote.totalCost,
+      confirmOfferUnits: confirmed.option.breakdown.spend,
+    });
+  });
+
+  it("quoteLimitBet → confirmQuote: cross-hop offer matches linear estimate", async () => {
+    const apiClient = makeCrossHopApiClient();
+    const sdk = new ToncastTxSdk({
+      apiClient,
+      tonClient: makeFakeTonClient(),
+      rateLimits: {
+        tonClient: { minIntervalMs: 0 },
+        stonApi: { minIntervalMs: 0 },
+      },
+      maxRetries: 0,
+    });
+    const priced = await sdk.priceCoins({
+      availableCoins: [
+        { address: TON_ADDRESS, amount: 2_000_000_000n },
+        { address: COMMUNITY_X, amount: 100_000_000n },
+      ],
+    });
+    const jetton = priced.find((c) => c.address === COMMUNITY_X)!;
+
+    const state = emptyOddsState();
+    state.No[22] = 17; // matchable at yesOdds=54
+    state.No[21] = 100; // matchable at yesOdds=56
+
+    const quote = await sdk.quoteLimitBet({
+      pariAddress: PARI,
+      beneficiary: BENEFICIARY,
+      isYes: true,
+      oddsState: state,
+      worstYesOdds: 56,
+      ticketsCount: 300,
+      referral: null,
+      referralPct: 0,
+      source: COMMUNITY_X,
+      pricedCoins: priced,
+    });
+    expect(quote.option.feasible).toBe(true);
+    // Strategy still produces the same merged bets regardless of source.
+    expect(quote.bets).toEqual([
+      { yesOdds: 54, ticketsCount: 17 },
+      { yesOdds: 56, ticketsCount: 283 },
+    ]);
+
+    const confirmed = await sdk.confirmQuote(quote, {
+      pariAddress: PARI,
+      beneficiary: BENEFICIARY,
+      referral: null,
+      referralPct: 0,
+    });
+    expect(confirmed.option.feasible).toBe(true);
+    if (!confirmed.option.feasible) return;
+
+    expectLinearEstimateMatchesConfirm({
+      pricedJetton: jetton,
+      totalCost: quote.totalCost,
+      confirmOfferUnits: confirmed.option.breakdown.spend,
+    });
+  });
+
+  it("quoteMarketBet → confirmQuote: cross-hop offer matches linear estimate", async () => {
+    const apiClient = makeCrossHopApiClient();
+    const sdk = new ToncastTxSdk({
+      apiClient,
+      tonClient: makeFakeTonClient(),
+      rateLimits: {
+        tonClient: { minIntervalMs: 0 },
+        stonApi: { minIntervalMs: 0 },
+      },
+      maxRetries: 0,
+    });
+    const priced = await sdk.priceCoins({
+      availableCoins: [
+        { address: TON_ADDRESS, amount: 2_000_000_000n },
+        { address: COMMUNITY_X, amount: 100_000_000n },
+      ],
+    });
+    const jetton = priced.find((c) => c.address === COMMUNITY_X)!;
+
+    // Half of jetton's tonEquivalent — well inside its capacity, market
+    // strategy can place it as a single placement on yesOdds=50 with
+    // an empty oddsState.
+    const maxBudget = jetton.tonEquivalent / 2n;
+    const quote = await sdk.quoteMarketBet({
+      pariAddress: PARI,
+      beneficiary: BENEFICIARY,
+      isYes: true,
+      oddsState: emptyOddsState(),
+      maxBudgetTon: maxBudget,
+      referral: null,
+      referralPct: 0,
+      source: COMMUNITY_X,
+      pricedCoins: priced,
+    });
+    expect(quote.option.feasible).toBe(true);
+    expect(quote.bets).toHaveLength(1);
+    expect(quote.bets[0]?.yesOdds).toBe(50);
+
+    const confirmed = await sdk.confirmQuote(quote, {
+      pariAddress: PARI,
+      beneficiary: BENEFICIARY,
+      referral: null,
+      referralPct: 0,
+    });
+    expect(confirmed.option.feasible).toBe(true);
+    if (!confirmed.option.feasible) return;
+
+    expectLinearEstimateMatchesConfirm({
+      pricedJetton: jetton,
+      totalCost: quote.totalCost,
+      confirmOfferUnits: confirmed.option.breakdown.spend,
+    });
+  });
+
+  it("availableForBet on cross-hop jetton lets a max-capacity bet still confirm", async () => {
+    // The structural change shrank cross-hop tonEquivalent by ~5 % vs
+    // the pre-fix value. Pin: a bet sized exactly at availableForBet
+    // (= tonEquivalent for jetton sources) must still confirm without
+    // bumping into insufficient_balance — i.e. the planner's linear
+    // estimate stays ≤ amount, AND confirmQuote's reverse simulation
+    // still fits the same jetton balance.
+    const apiClient = makeCrossHopApiClient();
+    const sdk = new ToncastTxSdk({
+      apiClient,
+      tonClient: makeFakeTonClient(),
+      rateLimits: {
+        tonClient: { minIntervalMs: 0 },
+        stonApi: { minIntervalMs: 0 },
+      },
+      maxRetries: 0,
+    });
+    const priced = await sdk.priceCoins({
+      availableCoins: [
+        { address: TON_ADDRESS, amount: 2_000_000_000n },
+        { address: COMMUNITY_X, amount: 100_000_000n },
+      ],
+    });
+    const jetton = priced.find((c) => c.address === COMMUNITY_X)!;
+
+    // Market mode greedy-spends maxBudgetTon. Setting it to exactly
+    // tonEquivalent forces the planner to size offerUnits right up to
+    // the jetton balance ceiling.
+    const quote = await sdk.quoteMarketBet({
+      pariAddress: PARI,
+      beneficiary: BENEFICIARY,
+      isYes: true,
+      oddsState: emptyOddsState(),
+      maxBudgetTon: jetton.tonEquivalent,
+      referral: null,
+      referralPct: 0,
+      source: COMMUNITY_X,
+      pricedCoins: priced,
+    });
+    expect(quote.option.feasible).toBe(true);
+
+    const confirmed = await sdk.confirmQuote(quote, {
+      pariAddress: PARI,
+      beneficiary: BENEFICIARY,
+      referral: null,
+      referralPct: 0,
+    });
+    expect(confirmed.option.feasible).toBe(true);
+    if (!confirmed.option.feasible) return;
+    // Confirmed offer units must not exceed the jetton balance —
+    // otherwise the wallet would refuse / revert on jetton transfer.
+    expect(confirmed.option.breakdown.spend).toBeLessThanOrEqual(jetton.amount);
+  });
+});
+
 describe("ToncastTxSdk utilities", () => {
   it("clearRateCache does not throw", () => {
     const sdk = new ToncastTxSdk();

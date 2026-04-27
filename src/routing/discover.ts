@@ -2,6 +2,7 @@ import type { StonApiClient } from "@ston-fi/api";
 import { DEFAULT_SLIPPAGE, DEX_VERSION, TON_ADDRESS } from "../constants.js";
 import { ToncastBetError, ToncastNetworkError } from "../errors.js";
 import { normalizeAddress, sameAddress } from "../utils/address.js";
+import { perLegSlippage } from "../utils/slippage.js";
 import { PairsCache } from "./pairsCache.js";
 
 /** Async wrapper for a `StonApiClient` call surfaced as {@link ToncastNetworkError}. */
@@ -172,13 +173,21 @@ export async function discoverRoute(
     );
   }
 
+  // Cross-hop simulation uses a per-leg slippage so the route's compound
+  // worst-case still equals the user's `slippage` route-total budget. The
+  // returned `leg1.minAskUnits` / `leg2.minAskUnits` thus reflect the
+  // per-leg floor (`ask × (1 − legSlip)`); pricing / rates layers compose
+  // those into a route-total floor when sizing tonEquivalent or rebuilding
+  // the swap on confirm. See `utils/slippage.ts::perLegSlippage`.
+  const legSlippage = perLegSlippage(slippage, 2);
+
   const leg1 = await callStonApi(
     () =>
       apiClient.simulateSwap({
         offerAddress,
         askAddress: intermediate,
         offerUnits,
-        slippageTolerance: slippage,
+        slippageTolerance: legSlippage,
         dexVersion: DEX_VERSION,
       }),
     "simulateSwap",
@@ -196,7 +205,7 @@ export async function discoverRoute(
         offerAddress: intermediate,
         askAddress: TON_ADDRESS,
         offerUnits: leg1.askUnits,
-        slippageTolerance: slippage,
+        slippageTolerance: legSlippage,
         dexVersion: DEX_VERSION,
       }),
     "simulateSwap",

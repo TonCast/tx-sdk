@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { grossUpForSlippage } from "../../src/utils/slippage.js";
+import {
+  combineLegSlippage,
+  grossUpForSlippage,
+  perLegSlippage,
+} from "../../src/utils/slippage.js";
 
 describe("grossUpForSlippage", () => {
   it("0% slippage is a no-op", () => {
@@ -56,5 +60,56 @@ describe("grossUpForSlippage", () => {
     expect(grossUpForSlippage(350_000_000n, "0.05")).toBe(368_421_053n);
     expect(grossUpForSlippage(100n, "0.1")).toBe(112n);
     expect(grossUpForSlippage(1_000_000_000n, "0.01")).toBe(1_010_101_011n);
+  });
+});
+
+describe("perLegSlippage", () => {
+  it("legCount=1 is the identity (direct routes unchanged)", () => {
+    expect(perLegSlippage("0.05", 1)).toBe("0.05");
+    expect(perLegSlippage("0.005", 1)).toBe("0.005");
+  });
+
+  it("legCount=2 splits user budget so compounded ≈ route-total", () => {
+    // (1 − perLeg)² = 1 − 0.05 → perLeg = 1 − √0.95 ≈ 0.0253205
+    const perLeg = perLegSlippage("0.05", 2);
+    const v = Number(perLeg);
+    // perLegSlippage caps at 9 decimals so the round-trip is accurate
+    // to ~10⁻⁹ — well inside any realistic slippage configuration.
+    expect(v).toBeCloseTo(1 - Math.sqrt(0.95), 8);
+    expect((1 - v) ** 2).toBeCloseTo(1 - 0.05, 8);
+  });
+
+  it("legCount=2 at 0% is 0% (no-op)", () => {
+    expect(Number(perLegSlippage("0", 2))).toBe(0);
+  });
+
+  it("rejects out-of-range slippage", () => {
+    expect(() => perLegSlippage("1", 2)).toThrow();
+    expect(() => perLegSlippage("-0.1", 2)).toThrow();
+    expect(() => perLegSlippage("not-a-number", 2)).toThrow();
+  });
+});
+
+describe("combineLegSlippage", () => {
+  it("legCount=1 is the identity", () => {
+    expect(combineLegSlippage("0.025", 1)).toBe("0.025");
+  });
+
+  it("legCount=2 composes via 1 − (1 − perLeg)²", () => {
+    // perLeg 0.025 → total = 1 − 0.975² = 0.049375
+    expect(Number(combineLegSlippage("0.025", 2))).toBeCloseTo(
+      1 - 0.975 ** 2,
+      9,
+    );
+  });
+
+  it("perLegSlippage and combineLegSlippage round-trip", () => {
+    const total = "0.05";
+    const perLeg = perLegSlippage(total, 2);
+    const recombined = combineLegSlippage(perLeg, 2);
+    // 9-decimal cap on each helper means the round-trip drift is at
+    // most ~10⁻⁹ — orders of magnitude finer than any realistic UI
+    // slippage step.
+    expect(Number(recombined)).toBeCloseTo(Number(total), 8);
   });
 });

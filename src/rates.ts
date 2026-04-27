@@ -2,7 +2,7 @@ import type { StonApiClient } from "@ston-fi/api";
 import { makeSwapCacheKey, TtlCache } from "./cache.js";
 import { DEFAULT_SLIPPAGE, DEX_VERSION, TON_ADDRESS } from "./constants.js";
 import { ToncastBetError } from "./errors.js";
-import { grossUpForSlippage } from "./utils/slippage.js";
+import { grossUpForSlippage, perLegSlippage } from "./utils/slippage.js";
 
 type NetworkCaller = <T>(fn: () => Promise<T>, method: string) => Promise<T>;
 
@@ -126,17 +126,35 @@ export function createRatesClient(opts: CreateRatesClientOptions): RatesClient {
       targetTonUnits,
       slippage = DEFAULT_SLIPPAGE,
     }) => {
-      // Leg 2: intermediate → TON. Gross up so leg2.minAskUnits stays
-      // ≥ targetTonUnits (the final delivery floor the Pari proxy needs).
+      // `slippage` is the user-facing route-TOTAL budget (max acceptable
+      // adverse movement on the final TON delivery). Each of the two legs
+      // gets a tighter per-leg budget so that compounding them across the
+      // route stays inside `slippage`:
+      //
+      //   (1 − perLeg)² = 1 − slippage   ⇒   perLeg = 1 − √(1 − slippage)
+      //
+      // For a 5% user slippage this is ~2.53% per leg, which composes to
+      // a ~5% gross-up on the offer jetton instead of the ~10.8% we used
+      // to charge by applying 5% on each leg independently. Matches the
+      // industry behaviour (STON.fi / Omniston quote a single bottom-line
+      // "minimum received" against the final asset), keeps the user's
+      // 5% as a true ceiling on the swap's worst-case under-delivery
+      // before revert, and aligns the planner's linear-approximation
+      // estimate with the actual `confirmQuote` swap amount.
+      const legSlip = perLegSlippage(slippage, 2);
+
+      // Leg 2: intermediate → TON. Gross up the ask by 1/(1 − legSlip)
+      // so the simulator's minAskUnits ≈ ask × (1 − legSlip) stays
+      // ≥ targetTonUnits, the floor the Pari proxy enforces.
       const leg2AskUnits = grossUpForSlippage(
         targetTonUnits,
-        slippage,
+        legSlip,
       ).toString();
       const leg2Key = makeSwapCacheKey({
         offerAddress: intermediate,
         askAddress: TON_ADDRESS,
         units: leg2AskUnits,
-        slippage,
+        slippage: legSlip,
         direction: "reverse",
       });
       const leg2 = await cache.remember(leg2Key, () =>
@@ -146,7 +164,7 @@ export function createRatesClient(opts: CreateRatesClientOptions): RatesClient {
               offerAddress: intermediate,
               askAddress: TON_ADDRESS,
               askUnits: leg2AskUnits,
-              slippageTolerance: slippage,
+              slippageTolerance: legSlip,
               dexVersion: DEX_VERSION,
             }),
           "simulateReverseSwap",
@@ -164,19 +182,22 @@ export function createRatesClient(opts: CreateRatesClientOptions): RatesClient {
         );
       }
       // Leg 1 must deliver enough of `intermediate` for leg 2 to clear its
-      // own slippage-adjusted minimum (`leg2.offerUnits`). Without the same
-      // gross-up, leg 1 may legally under-deliver the intermediate, leg 2
-      // reverts, and the user is refunded in the intermediate jetton —
-      // worse UX than a clean "swap didn't execute".
+      // own slippage-adjusted minimum (`leg2.offerUnits`). Same per-leg
+      // budget here — without a leg-1 gross-up at all, leg 1 may legally
+      // under-deliver the intermediate, leg 2 reverts, and the user is
+      // refunded in the intermediate jetton (worse UX than a clean
+      // "swap didn't execute"). With per-leg budget the worst-case under-
+      // delivery still keeps the cross-hop swap atomic-or-revert and the
+      // composed safety floor equals the user's stated route slippage.
       const leg1AskUnits = grossUpForSlippage(
         BigInt(leg2.offerUnits),
-        slippage,
+        legSlip,
       ).toString();
       const leg1Key = makeSwapCacheKey({
         offerAddress,
         askAddress: intermediate,
         units: leg1AskUnits,
-        slippage,
+        slippage: legSlip,
         direction: "reverse",
       });
       const leg1 = await cache.remember(leg1Key, () =>
@@ -186,7 +207,7 @@ export function createRatesClient(opts: CreateRatesClientOptions): RatesClient {
               offerAddress,
               askAddress: intermediate,
               askUnits: leg1AskUnits,
-              slippageTolerance: slippage,
+              slippageTolerance: legSlip,
               dexVersion: DEX_VERSION,
             }),
           "simulateReverseSwap",

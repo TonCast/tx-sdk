@@ -131,12 +131,15 @@ export type PricedCoin = {
   /** Human-readable explanation when `!viable`. */
   reason?: string;
   /**
-   * STON.fi's per-pool slippage recommendation, decimal fraction
-   * (e.g. `"0.003"` for 0.3 %). Computed on STON.fi side from pool
-   * depth + this swap size. For cross-hop routes this is the
-   * **larger** of the two leg recommendations (worst-leg dominates
-   * on-chain), so reflects what the riskiest hop wants. Absent for
-   * TON sources and for entries where STON.fi did not return it.
+   * STON.fi's slippage recommendation, decimal fraction (e.g.
+   * `"0.003"` for 0.3 %), expressed as a route-TOTAL slippage (=
+   * the user-facing budget on the final TON delivery, NOT a per-leg
+   * value). For direct routes this is leg1's per-pool recommendation
+   * unchanged. For cross-hop it is the two per-pool recommendations
+   * COMPOSED — `1 − (1 − r1)(1 − r2)` — so it can be compared
+   * directly against a user-set route-total slippage. Absent for
+   * TON sources and for entries where STON.fi did not return a
+   * usable per-pool value on either leg.
    */
   recommendedSlippage?: string;
   /**
@@ -150,7 +153,8 @@ export type PricedCoin = {
   recommendedMinAskUnits?: bigint;
   /**
    * Slippage actually used to compute `tonEquivalent` (= the floor
-   * the planner / `confirmQuote` enforce on swaps for this coin).
+   * the planner / `confirmQuote` enforce on swaps for this coin),
+   * expressed as a route-TOTAL slippage on the final TON delivery.
    *
    * `effectiveSlippage = min(recommendedSlippage, userSlippage)`,
    * with `userSlippage` defaulting to {@link DEFAULT_SLIPPAGE}. This
@@ -158,7 +162,12 @@ export type PricedCoin = {
    * pool is deep enough, but never relaxes the user-set ceiling — a
    * pool that wants more slippage than the user agreed to gets
    * capped (and may revert at the user's ceiling, which is the
-   * user's choice). Absent for TON sources.
+   * user's choice).
+   *
+   * For cross-hop routes the SDK internally splits this into a
+   * per-leg slippage so that the composed per-leg gross-up across
+   * both legs equals the route-total budget — see
+   * `utils/slippage.ts::perLegSlippage`. Absent for TON sources.
    */
   effectiveSlippage?: string;
 };
