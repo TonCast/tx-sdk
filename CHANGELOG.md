@@ -4,7 +4,18 @@ All notable changes to `@toncast/tx-sdk` will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.1.3]
+## [0.1.4]
+
+### Fixed
+
+- **Self-referral is now allowed.** The `REFERRAL_EQUALS_BENEFICIARY` validation
+  that rejected bets where `referral === beneficiary` has been removed — there is
+  no contract-level restriction on self-referral, so the SDK check was
+  over-restricting valid use-cases (e.g. a bettor routing their own referral
+  share back to themselves).
+  - `BetErrorCode` no longer includes `"REFERRAL_EQUALS_BENEFICIARY"`.
+  - `validateBetParams` no longer throws when `referral` equals `beneficiary`.
+
 
 ### Fixed
 

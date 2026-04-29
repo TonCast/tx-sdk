@@ -253,7 +253,7 @@ Two critical effects of splitting `senderAddress` and `beneficiary`:
 
 - **TonConnect flow**: the TonConnect session on your app is bound to the signing wallet. `senderAddress` **must** be that wallet's address; `beneficiary` can be any other valid TON address.
 - **Jetton balance check**: `priceCoins` must be called with the **signer's** coins — the signer is the one who actually parts with jettons. Passing the beneficiary's coins would produce a quote that looks viable but fails on-chain because the signer doesn't own those tokens.
-- **Referral constraint**: `referral` must not equal `beneficiary` (enforced by `REFERRAL_EQUALS_BENEFICIARY` check). It **can** equal `senderAddress` — the signer / agent can self-refer the bet and collect the referral share.
+- **Referral constraint**: `referral` can be any valid TON address, including `beneficiary` (self-referral is allowed) or `senderAddress`.
 - **TON-direct path** (no swap): the distinction between signer and beneficiary still applies to ticket ownership, but no STON.fi routing is involved. `buildTonBetTx` uses `beneficiary` for tickets and ignores `senderAddress` (any TON in the signed message comes from whoever signs — TonConnect already knows who that is).
 
 See `examples/bet-on-behalf.ts` for a self-contained runnable sample.
@@ -716,7 +716,7 @@ Infeasible:
 
 All errors extend `ToncastError`. Two subclasses:
 
-- **`ToncastBetError`** (validation / logic): `INVALID_ODDS`, `EMPTY_BETS`, `INVALID_ADDRESS`, `REFERRAL_EQUALS_BENEFICIARY`, `NO_ROUTE`, `SLIPPAGE_DRIFTED`, `SOURCE_NOT_VIABLE`, `SOURCE_NOT_IN_PRICED_COINS`, etc. Not retriable — fix the inputs.
+- **`ToncastBetError`** (validation / logic): `INVALID_ODDS`, `EMPTY_BETS`, `INVALID_ADDRESS`, `NO_ROUTE`, `SLIPPAGE_DRIFTED`, `SOURCE_NOT_VIABLE`, `SOURCE_NOT_IN_PRICED_COINS`, etc. Not retriable — fix the inputs.
 - **`ToncastNetworkError`** (upstream RPC/API): wraps `@ston-fi/api` or `@ston-fi/sdk` failures with `source` (`"stonApi"` | `"tonClient"`) and `method` fields. Retriable; the SDK already retries once by default.
 
 ## Configuration

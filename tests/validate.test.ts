@@ -109,17 +109,15 @@ describe("validateBetParams", () => {
       );
     });
 
-    it("referral == beneficiary → REFERRAL_EQUALS_BENEFICIARY", () => {
-      expectCode(
-        () =>
-          validateBetParams({
-            beneficiary: BENEFICIARY,
-            bets: validBets,
-            referral: BENEFICIARY,
-            referralPct: 5,
-          }),
-        "REFERRAL_EQUALS_BENEFICIARY",
-      );
+    it("referral == beneficiary → allowed (self-referral)", () => {
+      expect(() =>
+        validateBetParams({
+          beneficiary: BENEFICIARY,
+          bets: validBets,
+          referral: BENEFICIARY,
+          referralPct: 5,
+        }),
+      ).not.toThrow();
     });
   });
 

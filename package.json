@@ -1,6 +1,6 @@
 {
   "name": "@toncast/tx-sdk",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "TypeScript SDK to build TonConnect transactions for placing bets on Toncast Pari contracts (TON-direct or via STON.fi swaps from any jetton).",
   "license": "MIT",
   "homepage": "https://github.com/toncast/tx-sdk#readme",

@@ -21,16 +21,6 @@ function isValidAddress(value: string): boolean {
   }
 }
 
-function addressesEqual(a: string, b: string): boolean {
-  try {
-    const parsedA = Address.parse(a);
-    const parsedB = Address.parse(b);
-    return parsedA.equals(parsedB);
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Strict validation of bet parameters.
  *
@@ -108,12 +98,6 @@ export function validateBetParams(params: {
       throw new ToncastBetError(
         "INVALID_ADDRESS",
         `referral is not a valid TON address: ${referral}`,
-      );
-    }
-    if (addressesEqual(referral, beneficiary)) {
-      throw new ToncastBetError(
-        "REFERRAL_EQUALS_BENEFICIARY",
-        `referral and beneficiary must be different addresses`,
       );
     }
   }
